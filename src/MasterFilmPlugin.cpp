@@ -6,6 +6,11 @@
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
 #include "ofxPixels.h"
+#include "ofxParam.h" 
+
+#include "processors/ToneProcessor.h"
+#include "presets/StockLibrary.h"
+#include "presets/FilmPreset.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -16,13 +21,12 @@ static OfxStatus pluginMain(const char* action,
     OfxPropertySetHandle inArgs,
     OfxPropertySetHandle outArgs);
 
-// Called by Resolve before any other action — gives us the host pointer
 static void setHostFunc(OfxHost* host)
 {
     gHost = host;
 }
 
-// ── Global host suite pointers (populated at load time) ───────────────────────
+// ── Global host suite pointers ────────────────────────────────────────────────
 OfxHost* gHost = nullptr;
 OfxPropertySuiteV1* gPropSuite = nullptr;
 OfxImageEffectSuiteV1* gEffectSuite = nullptr;
@@ -31,31 +35,31 @@ OfxMemorySuiteV1* gMemorySuite = nullptr;
 OfxMultiThreadSuiteV1* gThreadSuite = nullptr;
 OfxMessageSuiteV2* gMessageSuite = nullptr;
 
-// ── Plugin descriptors ────────────────────────────────────────────────────────
-// We expose two OFX plugins from one binary: Pro and Lite.
-// The mode is encoded in the plugin identifier so Resolve lists them separately.
+// ── OFX parameter name constants ──────────────────────────────────────────────
+static constexpr const char* kParamColorSpace = "colorSpace";
 
+// Choice indices — order must match the options added in onDescribeInContext,
+// and must correspond to ColorSpaceMode enum values in FilmPreset.h.
+static constexpr int kColorSpaceACEScct = 0;
+static constexpr int kColorSpaceDWG = 1;
+static constexpr int kColorSpaceRec709 = 2;
+
+// ── Plugin descriptors ────────────────────────────────────────────────────────
 static OfxPlugin gPlugins[] = {
 #ifdef MASTERFILM_BUILD_PRO
     {
-        /* pluginApi */          kOfxImageEffectPluginApi,
-        /* apiVersion */         1,
-        /* pluginIdentifier */   "com.yourname.MasterFilmPro",
-        /* pluginVersionMajor */ MASTERFILM_VERSION_MAJOR,
-        /* pluginVersionMinor */ MASTERFILM_VERSION_MINOR,
-        /* setHost */            setHostFunc,
-        /* mainEntry */          pluginMain
+        kOfxImageEffectPluginApi, 1,
+        "com.yourname.MasterFilmPro",
+        MASTERFILM_VERSION_MAJOR, MASTERFILM_VERSION_MINOR,
+        setHostFunc, pluginMain
     },
 #endif
 #ifdef MASTERFILM_BUILD_LITE
     {
-        /* pluginApi */          kOfxImageEffectPluginApi,
-        /* apiVersion */         1,
-        /* pluginIdentifier */   "com.yourname.MasterFilmLite",
-        /* pluginVersionMajor */ MASTERFILM_VERSION_MAJOR,
-        /* pluginVersionMinor */ MASTERFILM_VERSION_MINOR,
-        /* setHost */            setHostFunc,
-        /* mainEntry */          pluginMain
+        kOfxImageEffectPluginApi, 1,
+        "com.yourname.MasterFilmLite",
+        MASTERFILM_VERSION_MAJOR, MASTERFILM_VERSION_MINOR,
+        setHostFunc, pluginMain
     },
 #endif
 };
@@ -76,14 +80,12 @@ OfxExport OfxPlugin* OfxGetPlugin(int nth)
     return &gPlugins[nth];
 }
 
-// ── Host fetch helper ─────────────────────────────────────────────────────────
+// ── Suite fetch ───────────────────────────────────────────────────────────────
 
 static OfxStatus fetchSuites()
 {
     if (!gHost) return kOfxStatErrMissingHostFeature;
 
-    // fetchSuite returns const void* in the real SDK — cast away const via void*
-    // This is the standard pattern used by all OFX host plugins
     gPropSuite = reinterpret_cast<OfxPropertySuiteV1*>(
         const_cast<void*>(gHost->fetchSuite(gHost->host, kOfxPropertySuite, 1)));
     gEffectSuite = reinterpret_cast<OfxImageEffectSuiteV1*>(
@@ -101,7 +103,7 @@ static OfxStatus fetchSuites()
     return kOfxStatOK;
 }
 
-// ── Plugin main dispatch ──────────────────────────────────────────────────────
+// ── Actions ───────────────────────────────────────────────────────────────────
 
 static OfxStatus onLoad()
 {
@@ -117,19 +119,12 @@ static OfxStatus onDescribe(OfxImageEffectHandle descriptor)
 {
     if (!gPropSuite || !gEffectSuite) return kOfxStatErrMissingHostFeature;
 
-    // Set the plugin label shown in Resolve's effects list
     OfxPropertySetHandle effectProps;
     gEffectSuite->getPropertySet(descriptor, &effectProps);
     gPropSuite->propSetString(effectProps, kOfxPropLabel, 0, "MasterFilm");
     gPropSuite->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "Film");
-
-    // Declare we support the filter context (one input, one output)
-    gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0,
-        kOfxImageEffectContextFilter);
-
-    // Declare supported pixel depths
-    gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0,
-        kOfxBitDepthFloat);
+    gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
+    gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
 
     return kOfxStatOK;
 }
@@ -137,33 +132,42 @@ static OfxStatus onDescribe(OfxImageEffectHandle descriptor)
 static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
     OfxPropertySetHandle inArgs)
 {
-    if (!gEffectSuite || !gPropSuite) return kOfxStatErrMissingHostFeature;
+    if (!gEffectSuite || !gPropSuite || !gParamSuite) return kOfxStatErrMissingHostFeature;
     (void)inArgs;
 
-    // Define Source clip (input)
+    // ── Clips ─────────────────────────────────────────────────────────────────
     OfxPropertySetHandle clipProps;
     gEffectSuite->clipDefine(descriptor, kOfxImageEffectSimpleSourceClipName, &clipProps);
-    gPropSuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0,
-        kOfxImageComponentRGBA);
+    gPropSuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
 
-    // Define Output clip
     gEffectSuite->clipDefine(descriptor, kOfxImageEffectOutputClipName, &clipProps);
-    gPropSuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0,
-        kOfxImageComponentRGBA);
+    gPropSuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+
+    // ── Parameters ────────────────────────────────────────────────────────────
+    OfxParamSetHandle paramSet;
+    gEffectSuite->getParamSet(descriptor, &paramSet);
+
+    // Color space dropdown — user tells us what their timeline is.
+    // Index maps directly to ColorSpaceMode: ACEScct=0, DWG=1, Rec709=2.
+    OfxPropertySetHandle paramProps;
+    gParamSuite->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorSpace, &paramProps);
+    gPropSuite->propSetString(paramProps, kOfxPropLabel, 0, "Color Space");
+    gPropSuite->propSetInt(paramProps, kOfxParamPropDefault, 0, kColorSpaceACEScct);
+    gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceACEScct, "ACEScct");
+    gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceDWG, "DaVinci Wide Gamut");
+    gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceRec709, "Rec.709");
 
     return kOfxStatOK;
 }
 
 static OfxStatus onCreateInstance(OfxImageEffectHandle instance)
 {
-    // TODO: allocate per-instance data
     (void)instance;
     return kOfxStatOK;
 }
 
 static OfxStatus onDestroyInstance(OfxImageEffectHandle instance)
 {
-    // TODO: free per-instance data
     (void)instance;
     return kOfxStatOK;
 }
@@ -171,9 +175,28 @@ static OfxStatus onDestroyInstance(OfxImageEffectHandle instance)
 static OfxStatus onRender(OfxImageEffectHandle instance,
     OfxPropertySetHandle inArgs)
 {
-    if (!gEffectSuite || !gPropSuite) return kOfxStatErrMissingHostFeature;
+    if (!gEffectSuite || !gPropSuite || !gParamSuite) return kOfxStatErrMissingHostFeature;
 
-    // ── Get render window from inArgs ─────────────────────────────────────────
+    // ── Read color space param ────────────────────────────────────────────────
+    OfxParamSetHandle paramSet;
+    gEffectSuite->getParamSet(instance, &paramSet);
+
+    OfxParamHandle colorSpaceParam = nullptr;
+    gParamSuite->paramGetHandle(paramSet, kParamColorSpace, &colorSpaceParam, nullptr);
+
+    int colorSpaceChoice = kColorSpaceACEScct; // safe default
+    if (colorSpaceParam)
+        gParamSuite->paramGetValue(colorSpaceParam, &colorSpaceChoice);
+
+    MasterFilm::ColorSpaceMode colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;
+    switch (colorSpaceChoice) {
+    case kColorSpaceACEScct: colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;          break;
+    case kColorSpaceDWG:     colorSpaceMode = MasterFilm::ColorSpaceMode::DaVinciWideGamut; break;
+    case kColorSpaceRec709:  colorSpaceMode = MasterFilm::ColorSpaceMode::Rec709;           break;
+    default:                 colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;          break;
+    }
+
+    // ── Get render window ─────────────────────────────────────────────────────
     OfxRectI renderWindow;
     gPropSuite->propGetInt(inArgs, kOfxImageEffectPropRenderWindow, 0, &renderWindow.x1);
     gPropSuite->propGetInt(inArgs, kOfxImageEffectPropRenderWindow, 1, &renderWindow.y1);
@@ -191,7 +214,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     double renderTime = 0.0;
     gPropSuite->propGetDouble(inArgs, kOfxPropTime, 0, &renderTime);
 
-    // ── Fetch image buffers at render time ────────────────────────────────────
+    // ── Fetch image buffers ───────────────────────────────────────────────────
     OfxPropertySetHandle srcImg = nullptr;
     OfxPropertySetHandle dstImg = nullptr;
     gEffectSuite->clipGetImage(srcClip, renderTime, nullptr, &srcImg);
@@ -203,19 +226,16 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // ── Get raw pixel pointers ────────────────────────────────────────────────
+    // ── Pixel pointers and strides ────────────────────────────────────────────
     void* srcPtr = nullptr;
     void* dstPtr = nullptr;
     gPropSuite->propGetPointer(srcImg, kOfxImagePropData, 0, &srcPtr);
     gPropSuite->propGetPointer(dstImg, kOfxImagePropData, 0, &dstPtr);
 
-    // ── Get row bytes (stride) ────────────────────────────────────────────────
-    int srcRowBytes = 0;
-    int dstRowBytes = 0;
+    int srcRowBytes = 0, dstRowBytes = 0;
     gPropSuite->propGetInt(srcImg, kOfxImagePropRowBytes, 0, &srcRowBytes);
     gPropSuite->propGetInt(dstImg, kOfxImagePropRowBytes, 0, &dstRowBytes);
 
-    // ── Get image bounds ──────────────────────────────────────────────────────
     OfxRectI srcBounds, dstBounds;
     gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 0, &srcBounds.x1);
     gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 1, &srcBounds.y1);
@@ -232,26 +252,44 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // ── Passthrough: copy source pixels to output row by row ──────────────────
-    // We work within the renderWindow — the region Resolve asked us to fill.
-    // Row iteration is bottom-up (OFX images are stored bottom-row first).
-    int nComponents = 4; // RGBA float = 4 floats per pixel
-    int bytesPerPixel = nComponents * sizeof(float);
+    // ── Select tone params for active color space ─────────────────────────────
+    // StockLibrary is a singleton — lookup is a linear scan, not a heap alloc.
+    // Hardcoded to Vision3 500T for Pass 1 tone validation.
+    // TODO: read selected stock from a param once the stock picker UI is wired.
+    const MasterFilm::FilmPreset* preset =
+        MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
 
-    for (int y = renderWindow.y1; y < renderWindow.y2; ++y) {
-        // Offset into each buffer — OFX row 0 is at the bottom of the image
-        char* srcRow = static_cast<char*>(srcPtr)
-            + (y - srcBounds.y1) * srcRowBytes
-            + (renderWindow.x1 - srcBounds.x1) * bytesPerPixel;
-        char* dstRow = static_cast<char*>(dstPtr)
-            + (y - dstBounds.y1) * dstRowBytes
-            + (renderWindow.x1 - dstBounds.x1) * bytesPerPixel;
-
-        int rowWidth = (renderWindow.x2 - renderWindow.x1) * bytesPerPixel;
-        std::memcpy(dstRow, srcRow, rowWidth);
+    if (!preset) {
+        gEffectSuite->clipReleaseImage(srcImg);
+        gEffectSuite->clipReleaseImage(dstImg);
+        return kOfxStatFailed;
     }
 
-    // ── Release image handles ─────────────────────────────────────────────────
+    // forMode() selects acesCCT / dwg / rec709 block with no allocation
+    const MasterFilm::ToneParams& toneParams = preset->tone.forMode(colorSpaceMode);
+    MasterFilm::ToneProcessor toneProc(toneParams);
+
+    // ── Process row by row ────────────────────────────────────────────────────
+    static constexpr int kNComponents = 4;
+    static constexpr int kBytesPerPixel = kNComponents * sizeof(float);
+    const int rowWidth = renderWindow.x2 - renderWindow.x1;
+
+    for (int y = renderWindow.y1; y < renderWindow.y2; ++y)
+    {
+        const float* srcRow = reinterpret_cast<const float*>(
+            static_cast<const char*>(srcPtr)
+            + static_cast<ptrdiff_t>(y - srcBounds.y1) * srcRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
+
+        float* dstRow = reinterpret_cast<float*>(
+            static_cast<char*>(dstPtr)
+            + static_cast<ptrdiff_t>(y - dstBounds.y1) * dstRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.x1 - dstBounds.x1) * kBytesPerPixel);
+
+        toneProc.processCPU(srcRow, dstRow, rowWidth, 1, kNComponents);
+    }
+
+    // ── Release ───────────────────────────────────────────────────────────────
     gEffectSuite->clipReleaseImage(srcImg);
     gEffectSuite->clipReleaseImage(dstImg);
 
@@ -268,36 +306,29 @@ static OfxStatus pluginMain(const char* action,
     try {
         if (std::strcmp(action, kOfxActionLoad) == 0)
             return onLoad();
-
         if (std::strcmp(action, kOfxActionUnload) == 0)
             return onUnload();
-
         if (std::strcmp(action, kOfxActionDescribe) == 0)
             return onDescribe(reinterpret_cast<OfxImageEffectHandle>(
                 const_cast<void*>(handle)));
-
         if (std::strcmp(action, kOfxImageEffectActionDescribeInContext) == 0)
             return onDescribeInContext(
                 reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle)),
                 inArgs);
-
         if (std::strcmp(action, kOfxActionCreateInstance) == 0)
             return onCreateInstance(reinterpret_cast<OfxImageEffectHandle>(
                 const_cast<void*>(handle)));
-
         if (std::strcmp(action, kOfxActionDestroyInstance) == 0)
             return onDestroyInstance(reinterpret_cast<OfxImageEffectHandle>(
                 const_cast<void*>(handle)));
-
         if (std::strcmp(action, kOfxImageEffectActionRender) == 0)
             return onRender(reinterpret_cast<OfxImageEffectHandle>(
                 const_cast<void*>(handle)), inArgs);
 
-        // Unhandled actions are fine — return ReplyDefault
         return kOfxStatReplyDefault;
     }
     catch (const std::exception& e) {
-        (void)e; // TODO: log via gMessageSuite if available
+        (void)e;
         return kOfxStatFailed;
     }
 }
