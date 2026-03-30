@@ -8,6 +8,7 @@
 #include "ofxMemory.h"
 #include "ofxMultiThread.h"
 #include "ofxMessage.h"
+#include "ofxPixels.h"
 
 // ── Global suite pointers (defined in MasterFilmPlugin.cpp) ──────────────────
 extern OfxHost* gHost;
