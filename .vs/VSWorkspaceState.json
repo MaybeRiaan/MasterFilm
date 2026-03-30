@@ -1,0 +1,18 @@
+{
+  "OutputFoldersPerTargetSystem": {
+    "Local Machine": [
+      "build\\Debug",
+      "C:\\Program Files\\Common Files\\OFX\\Plugins",
+      "build\\Release"
+    ]
+  },
+  "ExpandedNodes": [
+    "",
+    "\\include",
+    "\\out",
+    "\\src",
+    "\\src\\platform"
+  ],
+  "SelectedNode": "\\CMakeLists.txt",
+  "PreviewInSolutionExplorer": false
+}

@@ -1,0 +1,38 @@
+# Build outputs
+build/
+dist/
+*.ofx
+*.ofx.bundle
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
+# VS / Windows
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+x64/
+Debug/
+Release/
+
+# Metal intermediate
+*.air
+*.metallib
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp

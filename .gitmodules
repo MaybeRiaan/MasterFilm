@@ -1,0 +1,9 @@
+# .gitmodules
+# OpenFX SDK is pulled as a submodule from the official AcademySoftwareFoundation repo.
+# Headers only — no build step required.
+
+[submodule "openfx-sdk"]
+    path = openfx-sdk
+    url = https://github.com/AcademySoftwareFoundation/openfx.git
+    branch = main
+    shallow = true

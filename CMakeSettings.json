@@ -1,0 +1,65 @@
+﻿{
+  "configurations": [
+    {
+      "name": "x64-Release",
+      "generator": "Ninja",
+      "configurationType": "Release",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "buildRoot": "${projectDir}\\build\\Release",
+      "installRoot": "C:\\Program Files\\Common Files\\OFX\\Plugins",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "MASTERFILM_ENABLE_METAL",
+          "value": "OFF",
+          "type": "BOOL"
+        },
+        {
+          "name": "OFX_SDK_DIR",
+          "value": "${projectDir}\\openfx-sdk",
+          "type": "PATH"
+        },
+        {
+          "name": "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT",
+          "value": "ProgramDatabase",
+          "type": "STRING"
+        }
+      ]
+    },
+    
+    
+    {
+
+      "name": "x64-Debug",
+      "cmakeToolchain": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "generator": "Ninja",
+      "configurationType": "Debug",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "buildRoot": "${projectDir}\\build\\Debug",
+      "installRoot": "C:\\Program Files\\Common Files\\OFX\\Plugins",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "MASTERFILM_ENABLE_METAL",
+          "value": "OFF",
+          "type": "BOOL"
+        },
+        {
+          "name": "OFX_SDK_DIR",
+          "value": "${projectDir}\\openfx-sdk",
+          "type": "PATH"
+        },
+        {
+          "name": "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT",
+          "value": "ProgramDatabase",
+          "type": "STRING"
+        }
+      ]
+    }
+    
+  ]
+}
