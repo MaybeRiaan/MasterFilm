@@ -2,6 +2,7 @@
   "configurations": [
     {
       "name": "x64-Release",
+      "cmakeToolchain": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "generator": "Ninja",
       "configurationType": "Release",
       "inheritEnvironments": [ "msvc_x64_x64" ],

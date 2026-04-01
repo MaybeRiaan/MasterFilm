@@ -6,7 +6,6 @@
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
 #include "ofxPixels.h"
-#include "ofxParam.h" 
 
 #include "processors/ToneProcessor.h"
 #include "presets/StockLibrary.h"
@@ -35,11 +34,11 @@ OfxMemorySuiteV1* gMemorySuite = nullptr;
 OfxMultiThreadSuiteV1* gThreadSuite = nullptr;
 OfxMessageSuiteV2* gMessageSuite = nullptr;
 
-// ── OFX parameter name constants ──────────────────────────────────────────────
+// ── Parameter name constants ──────────────────────────────────────────────────
 static constexpr const char* kParamColorSpace = "colorSpace";
 
-// Choice indices — order must match the options added in onDescribeInContext,
-// and must correspond to ColorSpaceMode enum values in FilmPreset.h.
+// Choice indices — must match option order in onDescribeInContext
+// and correspond to ColorSpaceMode enum values in FilmPreset.h
 static constexpr int kColorSpaceACEScct = 0;
 static constexpr int kColorSpaceDWG = 1;
 static constexpr int kColorSpaceRec709 = 2;
@@ -147,8 +146,9 @@ static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
     OfxParamSetHandle paramSet;
     gEffectSuite->getParamSet(descriptor, &paramSet);
 
-    // Color space dropdown — user tells us what their timeline is.
-    // Index maps directly to ColorSpaceMode: ACEScct=0, DWG=1, Rec709=2.
+    // Color space dropdown — tells the plugin which internal CST to apply.
+    // The tone curve always operates in scene linear; this controls the
+    // forward and inverse transfer functions that wrap it.
     OfxPropertySetHandle paramProps;
     gParamSuite->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorSpace, &paramProps);
     gPropSuite->propSetString(paramProps, kOfxPropLabel, 0, "Color Space");
@@ -184,7 +184,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     OfxParamHandle colorSpaceParam = nullptr;
     gParamSuite->paramGetHandle(paramSet, kParamColorSpace, &colorSpaceParam, nullptr);
 
-    int colorSpaceChoice = kColorSpaceACEScct; // safe default
+    int colorSpaceChoice = kColorSpaceACEScct;
     if (colorSpaceParam)
         gParamSuite->paramGetValue(colorSpaceParam, &colorSpaceChoice);
 
@@ -252,10 +252,10 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // ── Select tone params for active color space ─────────────────────────────
-    // StockLibrary is a singleton — lookup is a linear scan, not a heap alloc.
-    // Hardcoded to Vision3 500T for Pass 1 tone validation.
-    // TODO: read selected stock from a param once the stock picker UI is wired.
+    // ── Build tone processor ──────────────────────────────────────────────────
+    // StockLibrary is a singleton — no heap allocation per frame.
+    // Hardcoded to Vision3 500T for Pass 1 validation.
+    // TODO: read selected stock from param once stock picker UI is wired.
     const MasterFilm::FilmPreset* preset =
         MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
 
@@ -265,11 +265,12 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // forMode() selects acesCCT / dwg / rec709 block with no allocation
-    const MasterFilm::ToneParams& toneParams = preset->tone.forMode(colorSpaceMode);
-    MasterFilm::ToneProcessor toneProc(toneParams);
+    MasterFilm::ToneProcessor toneProc(preset->tone);
 
     // ── Process row by row ────────────────────────────────────────────────────
+    // processCPU is called once per row (height=1).
+    // ColorSpaceMode is passed so the processor applies the correct
+    // forward/inverse CST around the linear-light tone curve.
     static constexpr int kNComponents = 4;
     static constexpr int kBytesPerPixel = kNComponents * sizeof(float);
     const int rowWidth = renderWindow.x2 - renderWindow.x1;
@@ -286,7 +287,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
             + static_cast<ptrdiff_t>(y - dstBounds.y1) * dstRowBytes
             + static_cast<ptrdiff_t>(renderWindow.x1 - dstBounds.x1) * kBytesPerPixel);
 
-        toneProc.processCPU(srcRow, dstRow, rowWidth, 1, kNComponents);
+        toneProc.processCPU(srcRow, dstRow, rowWidth, 1, kNComponents, colorSpaceMode);
     }
 
     // ── Release ───────────────────────────────────────────────────────────────

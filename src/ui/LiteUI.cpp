@@ -64,15 +64,8 @@ FilmPreset toFilmPreset(double grain, double glow, double sharpness,
 
     // ── Tone: contract/expand contrast around midpoint ────────────────────────
     float contrast = static_cast<float>((tone - 0.5) * 0.4);
-
-    auto adjustTone = [&](ToneParams& t, const ToneParams& b) {
-        t.toe = std::clamp(b.toe + contrast * 0.5f, 0.05f, 0.45f);
-        t.shoulder = std::clamp(b.shoulder - contrast * 0.5f, 0.55f, 0.95f);
-        };
-
-    adjustTone(p.tone.acesCCT, base.tone.acesCCT);
-    adjustTone(p.tone.dwg, base.tone.dwg);
-    adjustTone(p.tone.rec709, base.tone.rec709);
+    p.tone.toe = std::clamp(base.tone.toe + contrast * 0.5f, 0.05f, 0.45f);
+    p.tone.shoulder = std::clamp(base.tone.shoulder - contrast * 0.5f, 0.55f, 0.95f);
 
     // ── Color richness → saturation across all zones ──────────────────────────
     float satScale = static_cast<float>(0.5 + color * 1.0);  // [0.5, 1.5]

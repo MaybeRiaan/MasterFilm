@@ -1,22 +1,48 @@
 // src/presets/StockLibrary.cpp
 // Phase 1 film stock definitions.
-// Every parameter here is traceable to published manufacturer data or
-// peer-reviewed academic literature.
 //
-// TONE PARAMETER AUTHORING REFERENCE
+// TONE PARAMETER AUTHORING
 // ─────────────────────────────────────────────────────────────────────────────
-// blackPoint and whitePoint are in encoded units of each color space.
-// toe / shoulder / midGamma are space-independent (operate post-remap).
+// All ToneParams values are in SCENE LINEAR units, normalised so 0.18 = 18%
+// grey (middle grey). Values above 1.0 are valid and expected.
 //
-//   Space        Lin. black   Mid grey   Lin. white   Notes
-//   ACEScct      0.0729       0.4135     0.5547       Log, AP1 primaries
-//   DWG          0.1283       0.5000     0.5806       DaVinci Intermediate
-//   Rec709       0.0000       0.3955     1.0000       Gamma 2.4, no headroom
+// The tone curve is space-independent — ToneProcessor converts to/from scene
+// linear internally using ColorSpaceTransform.h. Stock authors do not need
+// to think about ACEScct, DWG, or Rec709 encoding here.
 //
-// blackPoint is set slightly above the encoded black floor to produce the
-// characteristic shadow lift of each stock, proportional to the floor value.
-// whitePoint is set slightly below the encoded white to produce shoulder
-// compression before the hard clip.
+// Key reference points in scene linear:
+//   0.0018  — practical black floor (~-6.5 stops below grey)
+//   0.18    — middle grey (0 stops)
+//   1.0     — diffuse white (~+2.5 stops above grey)
+//   6.0     — ~+5 stops above grey (Vision3 shoulder region)
+//   16.0    — kLinearMax ceiling (~+6.5 stops above grey)
+//
+// VISION3 500T DERIVATION (reference stock)
+// ─────────────────────────────────────────────────────────────────────────────
+// Source: Kodak Vision3 500T datasheet H-1-5219, sensitometric curves (ECN-2)
+// Green channel used as primary luminance reference.
+//
+// Reading the H&D curve, green channel:
+//   Camera stops   Linear value         Density (G)   Region
+//   -8             0.18 × 2^-8 = 0.0007   ~0.60      D-min
+//   -5             0.18 × 2^-5 = 0.0056   ~0.65      deep toe
+//   -3             0.18 × 2^-3 = 0.0225   ~0.80      toe end
+//   -1             0.18 × 2^-1 = 0.09     ~1.20      straight line
+//    0             0.18                   ~1.40      middle grey
+//   +2             0.18 × 2^2  = 0.72     ~1.80      straight line
+//   +5             0.18 × 2^5  = 5.76     ~2.20      shoulder start
+//   +8             0.18 × 2^8  = 46.0     ~2.50      shoulder (above kLinearMax)
+//
+// The straight line runs from ~-3 to ~+5 stops — 8 stops of linear response.
+// Toe begins below -3 stops. Shoulder begins above +5 stops.
+// This matches Kodak's "2 stops of extended highlight latitude" marketing claim.
+//
+// Parameter derivation:
+//   blackPoint 0.002  = midpoint of D-min region (~-6.5 stops, 0.0007–0.006)
+//   whitePoint 6.0    = shoulder onset (~+5 stops, 0.18 × 2^5 = 5.76)
+//   toe        0.35   = long gradual toe — rolls off early, very gentle
+//   shoulder   0.80   = late shoulder — consistent with 8-stop linear region
+//   midGamma   0.95   = slight mid compression from curve slope reading
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "StockLibrary.h"
@@ -53,9 +79,8 @@ namespace MasterFilm {
     }
 
     // ── B&W stocks ────────────────────────────────────────────────────────────────
-    // NOTE: tone params for B&W stocks are stubs — identical structure to cinema
-    // stocks but not yet authoured per color space. Will be updated after Vision3
-    // 500T tone validation is complete.
+    // Tone params are plausible estimates — will be derived from datasheets
+    // after Vision3 500T tone validation is complete.
 
     void StockLibrary::registerBW()
     {
@@ -87,10 +112,12 @@ namespace MasterFilm {
             p.acutance.intensity = 0.48f;
             p.acutance.rolloff = 0.50f;
 
-            // TODO: author per-space tone blocks after Vision3 500T validation
-            p.tone.acesCCT = { 0.083f, 0.552f, 0.28f, 0.72f, 0.98f };
-            p.tone.dwg = { 0.142f, 0.578f, 0.28f, 0.72f, 0.98f };
-            p.tone.rec709 = { 0.015f, 0.940f, 0.28f, 0.72f, 0.98f };
+            // TODO: derive from Ilford HP5 datasheet after Vision3 500T validation
+            p.tone.blackPoint = 0.002f;
+            p.tone.whitePoint = 5.0f;
+            p.tone.toe = 0.32f;
+            p.tone.shoulder = 0.75f;
+            p.tone.midGamma = 0.98f;
 
             mPresets.push_back(p);
         }
@@ -123,10 +150,12 @@ namespace MasterFilm {
             p.acutance.intensity = 0.52f;
             p.acutance.rolloff = 0.45f;
 
-            // TODO: author per-space tone blocks after Vision3 500T validation
-            p.tone.acesCCT = { 0.079f, 0.554f, 0.25f, 0.75f, 1.00f };
-            p.tone.dwg = { 0.136f, 0.579f, 0.25f, 0.75f, 1.00f };
-            p.tone.rec709 = { 0.010f, 0.950f, 0.25f, 0.75f, 1.00f };
+            // TODO: derive from Ilford FP4 datasheet
+            p.tone.blackPoint = 0.001f;
+            p.tone.whitePoint = 4.5f;
+            p.tone.toe = 0.28f;
+            p.tone.shoulder = 0.78f;
+            p.tone.midGamma = 1.00f;
 
             mPresets.push_back(p);
         }
@@ -160,10 +189,12 @@ namespace MasterFilm {
             p.acutance.rolloff = 0.40f;
             p.acutance.kostinskyStrength = 0.08f;
 
-            // TODO: author per-space tone blocks after Vision3 500T validation
-            p.tone.acesCCT = { 0.077f, 0.554f, 0.22f, 0.78f, 1.02f };
-            p.tone.dwg = { 0.134f, 0.579f, 0.22f, 0.78f, 1.02f };
-            p.tone.rec709 = { 0.008f, 0.955f, 0.22f, 0.78f, 1.02f };
+            // TODO: derive from Kodak T-Max 100 datasheet
+            p.tone.blackPoint = 0.001f;
+            p.tone.whitePoint = 4.0f;
+            p.tone.toe = 0.25f;
+            p.tone.shoulder = 0.80f;
+            p.tone.midGamma = 1.02f;
 
             mPresets.push_back(p);
         }
@@ -196,10 +227,12 @@ namespace MasterFilm {
             p.acutance.intensity = 0.45f;
             p.acutance.rolloff = 0.55f;
 
-            // TODO: author per-space tone blocks after Vision3 500T validation
-            p.tone.acesCCT = { 0.086f, 0.551f, 0.32f, 0.68f, 0.95f };
-            p.tone.dwg = { 0.144f, 0.577f, 0.32f, 0.68f, 0.95f };
-            p.tone.rec709 = { 0.018f, 0.935f, 0.32f, 0.68f, 0.95f };
+            // TODO: derive from Kodak Tri-X datasheet
+            p.tone.blackPoint = 0.003f;
+            p.tone.whitePoint = 5.5f;
+            p.tone.toe = 0.38f;
+            p.tone.shoulder = 0.72f;
+            p.tone.midGamma = 0.95f;
 
             mPresets.push_back(p);
         }
@@ -210,33 +243,16 @@ namespace MasterFilm {
     void StockLibrary::registerCinema()
     {
         // ── Kodak Vision3 500T ────────────────────────────────────────────────────
-        // Reference: Kodak Vision3 500T datasheet (H-1-5242); SMPTE papers (Hunt, Kennel)
-        // VALIDATION TARGET — full three-space tone authoring done here first.
-        //
-        // Tone derivation per space:
-        //
-        //   ACEScct:
-        //     blackPoint 0.083 = encoded floor (0.0729) + shadow lift (~0.010 scene stops)
-        //     whitePoint 0.554 = encoded 1.0 linear (0.5547) — just under hard clip
-        //
-        //   DWG (DaVinci Intermediate):
-        //     blackPoint 0.140 = encoded floor (0.1283) + proportional shadow lift
-        //     whitePoint 0.580 = encoded 1.0 linear (0.5806) — just under hard clip
-        //
-        //   Rec709 (gamma 2.4):
-        //     blackPoint 0.020 = no log floor — direct gamma lift, same intent as original
-        //     whitePoint 0.920 = tighter than 1.0 to give visible shoulder before clip
-        //     Note: Rec709 has no highlight headroom above 1.0 — shoulder is cosmetic only
-        //
-        //   toe / shoulder / midGamma are identical across all spaces:
-        //     These operate in normalised [0,1] space after the black/white remap,
-        //     so the curve shape is preserved regardless of which space is active.
+        // Reference: Kodak Vision3 500T datasheet H-1-5219
+        // Sensitometric curves: ECN-2 process, 3200K Tungsten, 1/50 sec
+        // Green channel used as primary luminance reference.
+        // See derivation notes at top of this file.
         {
             FilmPreset p;
             p.id = "kodak_vision3_500t";
             p.displayName = "Kodak Vision3 500T";
             p.category = "Cinema";
-            p.notes = "Most documented color negative. Coupling matrix from published SMPTE data.";
+            p.notes = "Derived from H-1-5219 sensitometric data. ECN-2 process.";
 
             p.grain.iso = 500.0f;
             p.grain.rmsGranularity = 12.0f;
@@ -250,7 +266,7 @@ namespace MasterFilm {
             p.halation.intensity = 0.35f;
             p.halation.radius = 0.45f;
             p.halation.threshold = 0.72f;
-            p.halation.biasR = 1.0f;
+            p.halation.biasR = 1.0f;   // Tungsten — strong red halation
             p.halation.biasG = 0.35f;
             p.halation.biasB = 0.12f;
             p.halation.outerWeight = 0.30f;
@@ -259,28 +275,17 @@ namespace MasterFilm {
             p.acutance.intensity = 0.44f;
             p.acutance.rolloff = 0.52f;
 
-            // ── Tone — three color space variants ─────────────────────────────────
-            p.tone.acesCCT = {
-                /* blackPoint */ 0.083f,   // encoded floor 0.0729 + lift
-                /* whitePoint */ 0.554f,   // encoded linear 1.0 = 0.5547
-                /* toe        */ 0.30f,
-                /* shoulder   */ 0.70f,
-                /* midGamma   */ 0.96f
-            };
-            p.tone.dwg = {
-                /* blackPoint */ 0.140f,   // encoded floor 0.1283 + lift
-                /* whitePoint */ 0.580f,   // encoded linear 1.0 = 0.5806
-                /* toe        */ 0.30f,
-                /* shoulder   */ 0.70f,
-                /* midGamma   */ 0.96f
-            };
-            p.tone.rec709 = {
-                /* blackPoint */ 0.020f,   // gamma space — no log floor
-                /* whitePoint */ 0.920f,   // below 1.0 to give visible shoulder
-                /* toe        */ 0.30f,
-                /* shoulder   */ 0.70f,
-                /* midGamma   */ 0.96f
-            };
+            // ── Tone — derived from H&D sensitometric curve, green channel ─────────
+            // blackPoint: D-min region, linear ~-6.5 stops below grey
+            // whitePoint: shoulder onset, ~+5 stops above grey (0.18 × 2^5 = 5.76)
+            // toe:        0.35 — very long, gradual rolloff (toe starts at -3 stops)
+            // shoulder:   0.80 — late shoulder consistent with 8-stop linear region
+            // midGamma:   0.95 — slight compression from straight-line slope reading
+            p.tone.blackPoint = 0.002f;
+            p.tone.whitePoint = 6.0f;
+            p.tone.toe = 0.35f;
+            p.tone.shoulder = 0.80f;
+            p.tone.midGamma = 0.95f;
 
             // Inter-layer coupling from published SMPTE density matrix data
             p.color.couplingMatrix = {
@@ -299,7 +304,7 @@ namespace MasterFilm {
         }
 
         // ── Kodak Vision3 250D ────────────────────────────────────────────────────
-        // TODO: author per-space tone blocks after Vision3 500T validation
+        // TODO: derive from Kodak Vision3 250D datasheet H-1-5241
         {
             FilmPreset p;
             p.id = "kodak_vision3_250d";
@@ -324,9 +329,11 @@ namespace MasterFilm {
             p.acutance.intensity = 0.48f;
             p.acutance.rolloff = 0.48f;
 
-            p.tone.acesCCT = { 0.081f, 0.554f, 0.28f, 0.72f, 0.98f };
-            p.tone.dwg = { 0.138f, 0.579f, 0.28f, 0.72f, 0.98f };
-            p.tone.rec709 = { 0.016f, 0.935f, 0.28f, 0.72f, 0.98f };
+            p.tone.blackPoint = 0.002f;
+            p.tone.whitePoint = 5.5f;
+            p.tone.toe = 0.32f;
+            p.tone.shoulder = 0.78f;
+            p.tone.midGamma = 0.98f;
 
             p.color.couplingMatrix = {
                  1.00f, -0.06f,  0.01f,
@@ -349,7 +356,8 @@ namespace MasterFilm {
     void StockLibrary::registerSlide()
     {
         // ── Fujifilm Velvia 50 ────────────────────────────────────────────────────
-        // TODO: author per-space tone blocks after Vision3 500T validation
+        // TODO: derive from Fujifilm Velvia 50 technical data
+        // Note: slide film has harder toe/shoulder and narrower latitude than negative
         {
             FilmPreset p;
             p.id = "fujifilm_velvia_50";
@@ -375,10 +383,13 @@ namespace MasterFilm {
             p.acutance.rolloff = 0.30f;
             p.acutance.kostinskyStrength = 0.22f;
 
-            // Slide stocks have harder toe/shoulder and slightly elevated mids
-            p.tone.acesCCT = { 0.075f, 0.554f, 0.18f, 0.80f, 1.05f };
-            p.tone.dwg = { 0.132f, 0.579f, 0.18f, 0.80f, 1.05f };
-            p.tone.rec709 = { 0.005f, 0.960f, 0.18f, 0.80f, 1.05f };
+            // Slide: narrower latitude, harder clip — shoulder starts earlier
+            // whitePoint ~+3 stops (0.18 × 2^3 = 1.44) reflects slide's limited headroom
+            p.tone.blackPoint = 0.003f;
+            p.tone.whitePoint = 1.5f;
+            p.tone.toe = 0.20f;
+            p.tone.shoulder = 0.72f;
+            p.tone.midGamma = 1.05f;
 
             p.color.couplingMatrix = {
                  1.00f,  0.05f,  0.02f,
@@ -396,7 +407,7 @@ namespace MasterFilm {
         }
 
         // ── Fujifilm Provia 100F ──────────────────────────────────────────────────
-        // TODO: author per-space tone blocks after Vision3 500T validation
+        // TODO: derive from Fujifilm Provia 100F technical data
         {
             FilmPreset p;
             p.id = "fujifilm_provia_100f";
@@ -422,9 +433,12 @@ namespace MasterFilm {
             p.acutance.rolloff = 0.44f;
             p.acutance.kostinskyStrength = 0.05f;
 
-            p.tone.acesCCT = { 0.076f, 0.554f, 0.20f, 0.78f, 1.00f };
-            p.tone.dwg = { 0.133f, 0.579f, 0.20f, 0.78f, 1.00f };
-            p.tone.rec709 = { 0.006f, 0.955f, 0.20f, 0.78f, 1.00f };
+            // Slide: slightly more latitude than Velvia but still narrower than negative
+            p.tone.blackPoint = 0.002f;
+            p.tone.whitePoint = 1.8f;
+            p.tone.toe = 0.22f;
+            p.tone.shoulder = 0.75f;
+            p.tone.midGamma = 1.00f;
 
             p.color.couplingMatrix = {
                  1.00f, -0.02f,  0.00f,

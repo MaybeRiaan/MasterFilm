@@ -8,11 +8,10 @@
   },
   "ExpandedNodes": [
     "",
-    "\\include",
-    "\\out",
-    "\\src",
-    "\\src\\platform"
+    "\\src\\platform",
+    "\\src\\presets",
+    "\\src\\processors"
   ],
-  "SelectedNode": "\\CMakeLists.txt",
+  "SelectedNode": "\\src",
   "PreviewInSolutionExplorer": false
 }
