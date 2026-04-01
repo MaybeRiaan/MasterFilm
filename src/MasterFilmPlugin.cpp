@@ -38,10 +38,10 @@ OfxMessageSuiteV2* gMessageSuite = nullptr;
 static constexpr const char* kParamColorSpace = "colorSpace";
 
 // Choice indices — must match option order in onDescribeInContext
-// and correspond to ColorSpaceMode enum values in FilmPreset.h
+// and correspond to ColorSpaceMode enum values in FilmPreset.h.
+// Rec.709 is intentionally excluded — see ColorSpaceMode for rationale.
 static constexpr int kColorSpaceACEScct = 0;
 static constexpr int kColorSpaceDWG = 1;
-static constexpr int kColorSpaceRec709 = 2;
 
 // ── Plugin descriptors ────────────────────────────────────────────────────────
 static OfxPlugin gPlugins[] = {
@@ -146,16 +146,15 @@ static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
     OfxParamSetHandle paramSet;
     gEffectSuite->getParamSet(descriptor, &paramSet);
 
-    // Color space dropdown — tells the plugin which internal CST to apply.
-    // The tone curve always operates in scene linear; this controls the
-    // forward and inverse transfer functions that wrap it.
+    // Color space dropdown — ACEScct and DaVinci Wide Gamut only.
+    // MasterFilm requires scene-referred wide gamut input.
+    // Rec.709 users should use external CST nodes.
     OfxPropertySetHandle paramProps;
     gParamSuite->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorSpace, &paramProps);
     gPropSuite->propSetString(paramProps, kOfxPropLabel, 0, "Color Space");
     gPropSuite->propSetInt(paramProps, kOfxParamPropDefault, 0, kColorSpaceACEScct);
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceACEScct, "ACEScct");
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceDWG, "DaVinci Wide Gamut");
-    gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceRec709, "Rec.709");
 
     return kOfxStatOK;
 }
@@ -192,7 +191,6 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     switch (colorSpaceChoice) {
     case kColorSpaceACEScct: colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;          break;
     case kColorSpaceDWG:     colorSpaceMode = MasterFilm::ColorSpaceMode::DaVinciWideGamut; break;
-    case kColorSpaceRec709:  colorSpaceMode = MasterFilm::ColorSpaceMode::Rec709;           break;
     default:                 colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;          break;
     }
 
@@ -253,9 +251,6 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     }
 
     // ── Build tone processor ──────────────────────────────────────────────────
-    // StockLibrary is a singleton — no heap allocation per frame.
-    // Hardcoded to Vision3 500T for Pass 1 validation.
-    // TODO: read selected stock from param once stock picker UI is wired.
     const MasterFilm::FilmPreset* preset =
         MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
 
@@ -268,9 +263,6 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     MasterFilm::ToneProcessor toneProc(preset->tone);
 
     // ── Process row by row ────────────────────────────────────────────────────
-    // processCPU is called once per row (height=1).
-    // ColorSpaceMode is passed so the processor applies the correct
-    // forward/inverse CST around the linear-light tone curve.
     static constexpr int kNComponents = 4;
     static constexpr int kBytesPerPixel = kNComponents * sizeof(float);
     const int rowWidth = renderWindow.x2 - renderWindow.x1;

@@ -14,10 +14,15 @@ namespace MasterFilm {
     // Tells the plugin which transfer function to use for the internal
     // scene-linear round trip. The tone curve itself is space-independent —
     // it always operates in scene linear light.
+    //
+    // MasterFilm requires a scene-referred wide gamut input space.
+    // Rec.709 is NOT supported — it is display-referred with no highlight
+    // headroom above 1.0, which is incompatible with the H&D curve model.
+    // Users on a Rec.709 timeline should sandwich the plugin between two
+    // CST nodes: Rec709 → ACEScct (input), ACEScct → Rec709 (output).
     enum class ColorSpaceMode {
-        ACEScct = 0,       // ACEScct / AP1 — log, middle grey at 0.4135
-        DaVinciWideGamut,  // DaVinci Wide Gamut / DaVinci Intermediate — middle grey at 0.5
-        Rec709             // Rec.709 gamma 2.4 / DaVinci YRGB
+        ACEScct = 0,      // ACEScct / AP1 — log, middle grey at 0.4135
+        DaVinciWideGamut  // DaVinci Wide Gamut / DaVinci Intermediate — middle grey at 0.5
     };
 
     // ── Grain ─────────────────────────────────────────────────────────────────────
@@ -59,24 +64,52 @@ namespace MasterFilm {
     };
 
     // ── Tone ──────────────────────────────────────────────────────────────────────
-    // All values are in SCENE LINEAR units, normalised so 0.18 = middle grey.
-    // Values above 1.0 are valid and expected — the LUT covers 0 to kLinearMax.
+    // Input parameters are in SCENE LINEAR units (0.18 = middle grey).
+    // Output parameters are NORMALISED [0,1] perceptual targets.
     //
-    // Derived from published H&D sensitometric curves (see StockLibrary.cpp).
-    // The curve always operates on scene linear light — color space conversion
-    // is handled internally by ToneProcessor via ColorSpaceTransform.h.
+    // This separation allows physical accuracy on the input side (values
+    // traceable to published sensitometric data) while maintaining perceptual
+    // correctness on the output side (the image looks right).
     //
-    //   blackPoint — linear value mapped to output 0.0 (D-min region)
-    //   whitePoint — linear value mapped to output 1.0 (shoulder region)
-    //   toe        — normalised inflection [0,1] in remapped space
-    //   shoulder   — normalised inflection [0,1] in remapped space
-    //   midGamma   — power in the straight-line region (< 1.0 compresses mids)
+    // INPUT — scene linear, traceable to H&D curve:
+    //   blackPoint — linear value that maps to output 0.0 (below D-min)
+    //   toeIn      — linear value where toe ends / straight line begins
+    //   shoulderIn — linear value where straight line ends / shoulder begins
+    //   whitePoint — linear value that maps to output 1.0 (shoulder ceiling)
+    //
+    // OUTPUT — normalised [0,1] perceptual targets:
+    //   toeOut      — output level at the toe/straight boundary
+    //   shoulderOut — output level at the straight/shoulder boundary
+    //
+    // SHAPE:
+    //   midGamma — power in the straight-line region (< 1.0 compresses mids)
+    //
+    // Reference stop offsets for input values (0.18 = 0 stops):
+    //   Stop    Linear value   Notes
+    //   -6.5    0.0022         practical black floor
+    //   -3.0    0.0225         typical toe onset (Vision3 500T)
+    //    0.0    0.1800         middle grey
+    //   +2.5    1.0000         diffuse white
+    //   +4.5    4.0000         Vision3 500T shoulder onset
+    //   +5.0    5.7600         Vision3 500T whitePoint
+    //
+    // NOTE — Option B (future refinement):
+    // Replace perceptual output targets with density-to-scan pipeline using
+    // print film data (e.g. Kodak Vision Premier 2383). Input params are already
+    // in correct physical units for that transition.
     struct ToneParams {
-        float blackPoint = 0.002f;  // ~-6.5 stops below grey — D-min
-        float whitePoint = 6.0f;    // ~+5 stops above grey — shoulder region
-        float toe = 0.35f;
-        float shoulder = 0.80f;
-        float midGamma = 1.0f;
+        // Input — scene linear
+        float blackPoint = 0.000f;    // true black
+        float toeIn = 0.022f;    // ~-3 stops below grey
+        float shoulderIn = 4.000f;    // ~+4.5 stops above grey
+        float whitePoint = 5.760f;    // ~+5 stops above grey
+
+        // Output — normalised perceptual targets [0,1]
+        float toeOut = 0.080f;    // output level at toe/straight boundary
+        float shoulderOut = 0.850f;    // output level at straight/shoulder boundary
+
+        // Shape
+        float midGamma = 1.000f;    // power in straight-line region
     };
 
     // ── Color / inter-layer coupling ──────────────────────────────────────────────
@@ -104,7 +137,7 @@ namespace MasterFilm {
         GrainParams    grain;
         HalationParams halation;
         AcutanceParams acutance;
-        ToneParams     tone;     // single block — space-independent, scene linear units
+        ToneParams     tone;
         ColorParams    color;
 
         std::string closestStockId;

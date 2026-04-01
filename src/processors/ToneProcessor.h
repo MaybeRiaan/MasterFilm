@@ -4,11 +4,22 @@
 // Signal flow per pixel:
 //   encoded input → [CST → scene linear] → LUT → [inverse CST → encoded] → output
 //
-// The LUT covers 0 to kLinearMax (16.0 linear) so highlights above diffuse
-// white (1.0) are handled correctly — this is where film's shoulder lives.
+// The curve has three regions defined by absolute scene linear input values:
+//   [0, toeIn]               — smoothstep from 0 to toeOut
+//   [toeIn, shoulderIn]      — linear region with midGamma, toeOut to shoulderOut
+//   [shoulderIn, whitePoint] — smoothstep from shoulderOut to 1.0
+//   [whitePoint, ∞]          — clamped to 1.0
 //
-// Color space conversion uses ColorSpaceTransform.h — analytical, no alloc.
-// Alpha is always passed through unchanged.
+// Input boundaries (toeIn, shoulderIn, whitePoint) are scene linear —
+// directly traceable to published H&D sensitometric data.
+// Output boundaries (toeOut, shoulderOut) are normalised [0,1] perceptual
+// targets — authored to produce the correct visual result.
+//
+// This separation means physical accuracy and perceptual correctness
+// are controlled independently.
+//
+// NOTE — Option B (future): replace output targets with density-to-scan
+// pipeline using print film data (e.g. Kodak Vision Premier 2383).
 #pragma once
 
 #include "../presets/FilmPreset.h"
@@ -24,15 +35,11 @@ namespace MasterFilm {
 
         void setParams(const ToneParams& p) { mParams = p; rebuildLUT(); }
 
-        // CPU processing — one row at a time from onRender (height=1).
-        // Applies forward CST, tone LUT, inverse CST per pixel.
-        // Alpha (channel 3) passes through unchanged.
         OfxStatus processCPU(const float* src, float* dst,
             int width, int height,
             int nComponents,
             ColorSpaceMode mode) const;
 
-        // GPU stub — not yet dispatched.
         OfxStatus processGPU(OfxImageEffectHandle effect,
             OfxPropertySetHandle srcImg,
             OfxPropertySetHandle dstImg) const;
@@ -40,15 +47,13 @@ namespace MasterFilm {
     private:
         ToneParams mParams;
 
-        // LUT covers scene linear 0 → kLinearMax.
-        // 1024 entries gives interpolation error well below float precision limits.
         static constexpr int   kLUTSize = 1024;
-        static constexpr float kLinearMax = 16.0f;  // ~+6.5 stops above diffuse white
+        static constexpr float kLinearMax = 16.0f;  // LUT ceiling — above whitePoint
 
         std::array<float, kLUTSize> mLUT;
 
         void  rebuildLUT();
-        float evaluateCurve(float x) const;         // x in [0, kLinearMax]
+        float evaluateCurve(float x) const;
         inline float sampleLUT(float linearVal) const;
     };
 

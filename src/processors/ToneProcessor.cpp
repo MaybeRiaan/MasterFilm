@@ -6,51 +6,51 @@
 namespace MasterFilm {
 
     // ── Curve evaluation ──────────────────────────────────────────────────────────
-    // x is scene linear, range [0, kLinearMax].
-    // Output is normalised density [0, 1].
+    // x        — scene linear input (0.18 = middle grey)
+    // returns  — normalised [0,1] where 1.0 corresponds to whitePoint linear
     //
-    // Steps:
-    //   1. Remap through blackPoint / whitePoint → normalised t in [0,1]
-    //   2. Toe smoothstep in shadow region
-    //   3. Shoulder smoothstep in highlight region
-    //   4. Mid-gamma power in the straight-line region between toe and shoulder
+    // Three regions defined by absolute scene linear input values:
+    //   Toe:      [blackPoint, toeIn]      — smoothstep 0 → toeOut
+    //   Straight: [toeIn, shoulderIn]      — linear with midGamma, toeOut → shoulderOut
+    //   Shoulder: [shoulderIn, whitePoint] — smoothstep shoulderOut → 1.0
+    //   Above wp: clamped to 1.0
     float ToneProcessor::evaluateCurve(float x) const
     {
-        // 1. Remap through black/white points
-        float t = (x - mParams.blackPoint) / (mParams.whitePoint - mParams.blackPoint);
-        t = std::clamp(t, 0.0f, 1.0f);
+        const float bp = mParams.blackPoint;
+        const float ti = mParams.toeIn;
+        const float si = mParams.shoulderIn;
+        const float wp = mParams.whitePoint;
+        const float to = mParams.toeOut;
+        const float so = mParams.shoulderOut;
 
-        const float toeEdge = mParams.toe;
-        const float shoulderEdge = mParams.shoulder;
+        if (x <= bp)
+            return 0.0f;
 
-        // 2. Toe — smooth shadow rolloff
-        if (t < toeEdge)
+        // Toe — smoothstep from 0 to toeOut
+        if (x < ti)
         {
-            float tn = t / toeEdge;
-            t = toeEdge * (tn * tn * (3.0f - 2.0f * tn));
+            float tn = (x - bp) / (ti - bp);
+            tn = std::clamp(tn, 0.0f, 1.0f);
+            return to * (tn * tn * (3.0f - 2.0f * tn));
         }
-        // 3. Shoulder — smooth highlight rolloff
-        else if (t > shoulderEdge)
+
+        // Shoulder — smoothstep from shoulderOut to 1.0
+        if (x >= si)
         {
-            float sn = (t - shoulderEdge) / (1.0f - shoulderEdge);
+            float sn = (x - si) / (wp - si);
+            sn = std::clamp(sn, 0.0f, 1.0f);
             float shaped = sn * sn * (3.0f - 2.0f * sn);
-            t = shoulderEdge + (1.0f - shoulderEdge) * shaped;
-        }
-        // 4. Mid-gamma — straight-line region
-        else
-        {
-            float mid = (t - toeEdge) / (shoulderEdge - toeEdge);
-            mid = std::pow(mid, 1.0f / mParams.midGamma);
-            t = toeEdge + mid * (shoulderEdge - toeEdge);
+            return so + (1.0f - so) * shaped;
         }
 
-        return std::clamp(t, 0.0f, 1.0f);
+        // Straight-line — midGamma applied, toeOut → shoulderOut
+        float t = (x - ti) / (si - ti);
+        t = std::clamp(t, 0.0f, 1.0f);
+        t = std::pow(t, 1.0f / mParams.midGamma);
+        return to + t * (so - to);
     }
 
     // ── LUT bake ──────────────────────────────────────────────────────────────────
-    // Entry i maps scene linear value (i / (kLUTSize-1)) * kLinearMax → density.
-    // kLinearMax = 16.0 covers ~+6.5 stops above diffuse white — enough for any
-    // real scene. Values above kLinearMax are clamped to the shoulder output.
     void ToneProcessor::rebuildLUT()
     {
         for (int i = 0; i < kLUTSize; ++i)
@@ -62,11 +62,8 @@ namespace MasterFilm {
     }
 
     // ── LUT sampler ───────────────────────────────────────────────────────────────
-    // Converts a scene linear value to a [0,1] LUT index, then bilinear interpolates.
-    // Values outside [0, kLinearMax] are clamped to the LUT endpoints.
     inline float ToneProcessor::sampleLUT(float linearVal) const
     {
-        // Normalise to LUT index space
         float fi = (std::clamp(linearVal, 0.0f, kLinearMax) / kLinearMax)
             * static_cast<float>(kLUTSize - 1);
 
@@ -81,17 +78,23 @@ namespace MasterFilm {
     // ── CPU processing ────────────────────────────────────────────────────────────
     // Per pixel:
     //   1. Forward CST: encoded working space → scene linear
-    //   2. LUT sample: scene linear → normalised density [0,1]
-    //   3. Inverse CST: normalised density → encoded working space
+    //   2. LUT: scene linear → normalised [0,1] density output
+    //   3. Scale: normalised output × whitePoint → scene linear
+    //      (LUT output of 1.0 corresponds to whitePoint in scene linear)
+    //   4. Inverse CST: scene linear → encoded working space
     //
-    // Called once per row (height=1) from onRender so stride handling stays
-    // in the caller. Alpha channel (index 3) is always passed through.
+    // Step 3 is critical — the LUT outputs a normalised value, not a scene
+    // linear value. The inverse CST expects scene linear, so we must rescale
+    // before passing to fromLinear(). Without this the inverse CST receives
+    // values in [0,1] and interprets them as very dark scene linear values,
+    // producing heavily compressed and banded output.
     OfxStatus ToneProcessor::processCPU(const float* src, float* dst,
         int width, int height,
         int nComponents,
         ColorSpaceMode mode) const
     {
-        const int nPixels = width * height;
+        const int   nPixels = width * height;
+        const float wpScale = mParams.whitePoint;  // scale factor for step 3
 
         if (nComponents == 4)
         {
@@ -100,21 +103,26 @@ namespace MasterFilm {
 
             for (int p = 0; p < nPixels; ++p, s += 4, d += 4)
             {
-                // Forward CST → scene linear
+                // 1. Forward CST → scene linear
                 float r = CST::toLinear(s[0], mode);
                 float g = CST::toLinear(s[1], mode);
                 float b = CST::toLinear(s[2], mode);
 
-                // Tone curve in linear light
+                // 2. Tone curve → normalised [0,1]
                 r = sampleLUT(r);
                 g = sampleLUT(g);
                 b = sampleLUT(b);
 
-                // Inverse CST → working color space
+                // 3. Scale back to scene linear
+                r *= wpScale;
+                g *= wpScale;
+                b *= wpScale;
+
+                // 4. Inverse CST → working color space
                 d[0] = CST::fromLinear(r, mode);
                 d[1] = CST::fromLinear(g, mode);
                 d[2] = CST::fromLinear(b, mode);
-                d[3] = s[3];  // alpha unchanged
+                d[3] = s[3];
             }
         }
         else if (nComponents == 3)
@@ -124,9 +132,9 @@ namespace MasterFilm {
 
             for (int p = 0; p < nPixels; ++p, s += 3, d += 3)
             {
-                d[0] = CST::fromLinear(sampleLUT(CST::toLinear(s[0], mode)), mode);
-                d[1] = CST::fromLinear(sampleLUT(CST::toLinear(s[1], mode)), mode);
-                d[2] = CST::fromLinear(sampleLUT(CST::toLinear(s[2], mode)), mode);
+                d[0] = CST::fromLinear(sampleLUT(CST::toLinear(s[0], mode)) * wpScale, mode);
+                d[1] = CST::fromLinear(sampleLUT(CST::toLinear(s[1], mode)) * wpScale, mode);
+                d[2] = CST::fromLinear(sampleLUT(CST::toLinear(s[2], mode)) * wpScale, mode);
             }
         }
 
@@ -137,7 +145,6 @@ namespace MasterFilm {
         OfxPropertySetHandle,
         OfxPropertySetHandle) const
     {
-        // TODO: upload mLUT as 1D texture, dispatch tone.glsl with CST uniforms
         return kOfxStatReplyDefault;
     }
 

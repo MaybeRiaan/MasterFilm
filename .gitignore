@@ -36,3 +36,4 @@ Release/
 .vscode/
 .idea/
 *.swp
+.vs/
