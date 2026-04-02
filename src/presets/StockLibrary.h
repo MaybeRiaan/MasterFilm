@@ -25,9 +25,7 @@ public:
 private:
     StockLibrary();  // populates mPresets
 
-    void registerBW();      // Ilford HP5+, FP4+, Kodak T-Max 100, Tri-X 400
-    void registerCinema();  // Kodak Vision3 500T, 250D
-    void registerSlide();   // Fujifilm Velvia 50, Provia 100F
+    void registerCinema();  // Kodak Vision3 500T
 
     std::vector<FilmPreset> mPresets;
 };

@@ -64,52 +64,80 @@ namespace MasterFilm {
     };
 
     // ── Tone ──────────────────────────────────────────────────────────────────────
-    // Input parameters are in SCENE LINEAR units (0.18 = middle grey).
-    // Output parameters are NORMALISED [0,1] perceptual targets.
     //
-    // This separation allows physical accuracy on the input side (values
-    // traceable to published sensitometric data) while maintaining perceptual
-    // correctness on the output side (the image looks right).
+    // PHYSICAL MODEL
+    // ─────────────────────────────────────────────────────────────────────────────
+    // The tone processor models three physical stages:
     //
-    // INPUT — scene linear, traceable to H&D curve:
-    //   blackPoint — linear value that maps to output 0.0 (below D-min)
-    //   toeIn      — linear value where toe ends / straight line begins
-    //   shoulderIn — linear value where straight line ends / shoulder begins
-    //   whitePoint — linear value that maps to output 1.0 (shoulder ceiling)
+    //   1. Exposure:     scene linear → log exposure (log10 based)
+    //   2. H&D curve:    log exposure → density (per-channel characteristic curve)
+    //   3. Scan encode:  density → working space code value (linear rescale)
     //
-    // OUTPUT — normalised [0,1] perceptual targets:
-    //   toeOut      — output level at the toe/straight boundary
-    //   shoulderOut — output level at the straight/shoulder boundary
+    // Each emulsion layer (R, G, B) is a physically independent coating with
+    // its own characteristic curve. The green channel serves as the luminance
+    // reference — red and blue diverge from green to produce the stock's
+    // colour signature.
     //
-    // SHAPE:
-    //   midGamma — power in the straight-line region (< 1.0 compresses mids)
+    // CHANNEL CURVE PARAMETERS
+    // ─────────────────────────────────────────────────────────────────────────────
+    // All input values are in CAMERA STOPS relative to middle grey (0 = 0.18).
+    // This matches the x-axis of published sensitometric curves directly.
     //
-    // Reference stop offsets for input values (0.18 = 0 stops):
-    //   Stop    Linear value   Notes
-    //   -6.5    0.0022         practical black floor
-    //   -3.0    0.0225         typical toe onset (Vision3 500T)
-    //    0.0    0.1800         middle grey
-    //   +2.5    1.0000         diffuse white
-    //   +4.5    4.0000         Vision3 500T shoulder onset
-    //   +5.0    5.7600         Vision3 500T whitePoint
+    //   toeStartStops  — where the curve lifts off base fog
+    //   toeEndStops    — where toe transitions to straight line
+    //   shoulderStops  — where straight line transitions to shoulder
+    //   clipStops      — where the curve reaches Dmax (full saturation)
     //
-    // NOTE — Option B (future refinement):
-    // Replace perceptual output targets with density-to-scan pipeline using
-    // print film data (e.g. Kodak Vision Premier 2383). Input params are already
-    // in correct physical units for that transition.
-    struct ToneParams {
-        // Input — scene linear
-        float blackPoint = 0.000f;    // true black
-        float toeIn = 0.022f;    // ~-3 stops below grey
-        float shoulderIn = 4.000f;    // ~+4.5 stops above grey
-        float whitePoint = 5.760f;    // ~+5 stops above grey
+    // Density values are ABSOLUTE STATUS-M densities as published:
+    //   dMin           — base fog + minimum density
+    //   dMax           — maximum achievable density
+    //
+    // Shape:
+    //   gamma          — slope of the straight-line region (density per stop)
+    //
+    // SCAN ENCODING
+    // ─────────────────────────────────────────────────────────────────────────────
+    // After the H&D curve produces a density value, the scan encoder maps
+    // the density range [dMin, dMax] into working space code values.
+    // This replaces the broken fromLinear() inverse CST — density is not
+    // scene-linear radiance and cannot be converted with a radiometric
+    // transfer function.
+    //
+    // The scan encode anchors (codeBlack, codeWhite) are set per color space
+    // at runtime — they are properties of the encoding, not the film.
+    //
+    // FILM COLOR CONTROL
+    // ─────────────────────────────────────────────────────────────────────────────
+    // filmColor [0,1] blends R and B density toward G density:
+    //   0.0 = all channels use green curve (pure tone, no color shift)
+    //   1.0 = each channel uses its own curve (full stock colour signature)
+    //   >1.0 = exaggerated colour separation (artistic override)
 
-        // Output — normalised perceptual targets [0,1]
-        float toeOut = 0.080f;    // output level at toe/straight boundary
-        float shoulderOut = 0.850f;    // output level at straight/shoulder boundary
+    // Per-channel characteristic curve parameters.
+    // One instance per emulsion layer (R, G, B).
+    struct ChannelCurve {
+        // Input — camera stops relative to middle grey (0.18 = 0 stops)
+        float toeStartStops  = -6.0f;   // curve lifts off base fog
+        float toeEndStops    = -3.0f;   // toe → straight transition
+        float shoulderStops  =  6.0f;   // straight → shoulder transition
+        float clipStops      =  8.0f;   // curve reaches Dmax
+
+        // Density — absolute Status-M values from published data
+        float dMin           =  0.20f;  // base fog
+        float dMax           =  2.40f;  // maximum density
 
         // Shape
-        float midGamma = 1.000f;    // power in straight-line region
+        float gamma          =  0.25f;  // density per stop in straight-line region
+    };
+
+    struct ToneParams {
+        // Per-channel H&D curves — green is the luminance reference
+        ChannelCurve red;
+        ChannelCurve green;
+        ChannelCurve blue;
+
+        // Film Color — blends R/B toward G (0 = tone only, 1 = full stock colour)
+        float filmColor = 1.0f;
     };
 
     // ── Color / inter-layer coupling ──────────────────────────────────────────────

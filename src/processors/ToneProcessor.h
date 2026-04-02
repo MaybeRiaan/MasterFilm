@@ -1,25 +1,37 @@
 // src/processors/ToneProcessor.h
-// Pass 1: H&D tone curve operating in scene linear light.
+// Pass 1: Per-channel H&D characteristic curve with scan encoding.
 //
-// Signal flow per pixel:
-//   encoded input → [CST → scene linear] → LUT → [inverse CST → encoded] → output
+// Physical signal flow per pixel:
+//   encoded input → [CST → scene linear]
+//                 → log exposure (log2 relative to middle grey)
+//                 → H&D curve per channel (log exposure → density)
+//                 → film color blend (lerp R/B density toward G)
+//                 → scan encode (density → working space code value)
+//                 → output
 //
-// The curve has three regions defined by absolute scene linear input values:
-//   [0, toeIn]               — smoothstep from 0 to toeOut
-//   [toeIn, shoulderIn]      — linear region with midGamma, toeOut to shoulderOut
-//   [shoulderIn, whitePoint] — smoothstep from shoulderOut to 1.0
-//   [whitePoint, ∞]          — clamped to 1.0
+// SCAN ENCODING — DUAL ANCHOR, SINGLE SCALE
+// ─────────────────────────────────────────────────────────────────────────────
+// Two points on the GREEN channel's straight line define the scale:
 //
-// Input boundaries (toeIn, shoulderIn, whitePoint) are scene linear —
-// directly traceable to published H&D sensitometric data.
-// Output boundaries (toeOut, shoulderOut) are normalised [0,1] perceptual
-// targets — authored to produce the correct visual result.
+//   density at 0 stops      →  codeMidGrey
+//   density at shoulder     →  codeHighlight
 //
-// This separation means physical accuracy and perceptual correctness
-// are controlled independently.
+//   scale = (codeHighlight - codeMidGrey) / (dHighG - dMidG)
 //
-// NOTE — Option B (future): replace output targets with density-to-scan
-// pipeline using print film data (e.g. Kodak Vision Premier 2383).
+// This single scale applies to ALL channels. Per-channel colour comes
+// from each channel producing DIFFERENT density values at the same
+// exposure — not from different encoding scales. This matches a real
+// scanner, which applies one transfer function regardless of which
+// emulsion layer it's reading.
+//
+// Each channel anchors its own dMid to codeMidGrey so that a neutral
+// grey card produces neutral output. Away from grey, the channels
+// diverge because their gammas, toe onsets, and shoulder onsets differ.
+// That divergence IS the film's colour signature.
+//
+// Film Color control:
+//   0.0 — all channels use green curve (pure tone, no colour shift)
+//   1.0 — each channel uses its own curve (full stock colour signature)
 #pragma once
 
 #include "../presets/FilmPreset.h"
@@ -31,9 +43,9 @@ namespace MasterFilm {
 
     class ToneProcessor {
     public:
-        explicit ToneProcessor(const ToneParams& params) : mParams(params) { rebuildLUT(); }
+        explicit ToneProcessor(const ToneParams& params) : mParams(params) { rebuildLUTs(); }
 
-        void setParams(const ToneParams& p) { mParams = p; rebuildLUT(); }
+        void setParams(const ToneParams& p) { mParams = p; rebuildLUTs(); }
 
         OfxStatus processCPU(const float* src, float* dst,
             int width, int height,
@@ -47,14 +59,35 @@ namespace MasterFilm {
     private:
         ToneParams mParams;
 
+        // LUT parameters — log2 stops domain
         static constexpr int   kLUTSize = 1024;
-        static constexpr float kLinearMax = 16.0f;  // LUT ceiling — above whitePoint
+        static constexpr float kStopsMin = -8.0f;
+        static constexpr float kStopsMax =  9.0f;
+        static constexpr float kStopsRange = kStopsMax - kStopsMin;
 
-        std::array<float, kLUTSize> mLUT;
+        // Three LUTs — one per channel, indexed by log2 stops
+        std::array<float, kLUTSize> mLUT_R;
+        std::array<float, kLUTSize> mLUT_G;
+        std::array<float, kLUTSize> mLUT_B;
 
-        void  rebuildLUT();
-        float evaluateCurve(float x) const;
-        inline float sampleLUT(float linearVal) const;
+        // Per-channel density at middle grey (0 stops)
+        float mDMidR;
+        float mDMidG;
+        float mDMidB;
+
+        // Green channel density at shoulder onset (for scale derivation)
+        float mDHighG;
+
+        void  rebuildLUTs();
+        float evaluateCurve(float logExposure, const ChannelCurve& curve) const;
+        float sampleLUT(float logExposure, const std::array<float, kLUTSize>& lut) const;
+
+        // Scan encoding
+        static float scanEncode(float density, float dMid,
+                                float codeMidGrey, float scale);
+
+        static float getCodeMidGrey(ColorSpaceMode mode);
+        static float getCodeHighlight(ColorSpaceMode mode);
     };
 
 } // namespace MasterFilm

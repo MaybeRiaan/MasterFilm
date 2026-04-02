@@ -1,31 +1,28 @@
 // src/presets/StockLibrary.cpp
-// Phase 1 film stock definitions.
-// Currently only Vision3 500T is active — other stocks will be added
-// after tone validation is complete.
+// Film stock definitions — Vision3 500T only during tone validation.
 //
-// TONE PARAMETER AUTHORING
+// PER-CHANNEL CURVE DERIVATION
 // ─────────────────────────────────────────────────────────────────────────────
-// Input params are in SCENE LINEAR units (0.18 = middle grey).
-// Output params are normalised [0,1] perceptual targets.
+// Source: Kodak Vision3 500T datasheet H-1-5219, sensitometric curves
+//         Exposure: 3200K Tungsten 1/50 sec, Process: ECN-2
+//         Densitometry: ECN-2 (Status-M)
 //
-// Key reference points in scene linear:
-//   0.0022  — practical black floor (~-6.5 stops below grey)
-//   0.0225  — toe end (~-3 stops below grey, 0.18 × 2^-3)
-//   0.1800  — middle grey (0 stops)
-//   1.0000  — diffuse white (~+2.5 stops above grey)
-//   4.0000  — shoulder onset (~+4.5 stops, 0.18 × 2^4.5)
-//   5.7600  — whitePoint (~+5 stops, 0.18 × 2^5)
-//  16.0000  — kLinearMax ceiling (~+6.5 stops above grey)
+// Values read from published sensitometric chart, camera stops x-axis:
 //
-// VISION3 500T DERIVATION
-// ─────────────────────────────────────────────────────────────────────────────
-// Source: Kodak Vision3 500T datasheet H-1-5219, sensitometric curves (ECN-2)
-// Green channel used as primary luminance reference.
-// Straight line runs from ~-3 to ~+5 stops — 8 stops of linear response.
+//              Red         Green       Blue
+//   dMin:      0.15        0.25        0.45       base fog
+//   dMax:      1.80        2.30        2.85       max density
+//   gamma:     0.20        0.25        0.30       density/stop (straight line)
+//   toeStart: -5.0        -5.5        -6.0       lifts off base fog
+//   toeEnd:   -3.0        -3.0        -3.0       enters straight line
+//   shoulder: +6.0        +6.5        +5.0       exits straight line
+//   clip:     +7.5        +8.0        +7.0       reaches Dmax
+//
+// Green channel is the luminance reference. Red and blue diverge to
+// produce the stock's colour signature — controlled by filmColor param.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "StockLibrary.h"
-#include <algorithm>
 
 namespace MasterFilm {
 
@@ -37,9 +34,7 @@ namespace MasterFilm {
 
     StockLibrary::StockLibrary()
     {
-        registerBW();
         registerCinema();
-        registerSlide();
     }
 
     const FilmPreset* StockLibrary::findById(const std::string& id) const
@@ -57,17 +52,11 @@ namespace MasterFilm {
         return out;
     }
 
-    void StockLibrary::registerBW()
-    {
-        // Stocks will be added after Vision3 500T tone validation is complete.
-    }
-
     void StockLibrary::registerCinema()
     {
         // ── Kodak Vision3 500T ────────────────────────────────────────────────────
         // Reference: Kodak Vision3 500T datasheet H-1-5219
         // Sensitometric curves: ECN-2 process, 3200K Tungsten, 1/50 sec
-        // Green channel used as primary luminance reference.
         {
             FilmPreset p;
             p.id = "kodak_vision3_500t";
@@ -87,7 +76,7 @@ namespace MasterFilm {
             p.halation.intensity = 0.35f;
             p.halation.radius = 0.45f;
             p.halation.threshold = 0.72f;
-            p.halation.biasR = 1.0f;    // Tungsten — strong red halation
+            p.halation.biasR = 1.0f;
             p.halation.biasG = 0.35f;
             p.halation.biasB = 0.12f;
             p.halation.outerWeight = 0.30f;
@@ -96,15 +85,37 @@ namespace MasterFilm {
             p.acutance.intensity = 0.44f;
             p.acutance.rolloff = 0.52f;
 
-            // Input — scene linear, derived from H-1-5219 sensitometric curve
-            // Output — normalised perceptual targets
-            p.tone.blackPoint = 0.000f;   // true black
-            p.tone.toeIn = 0.022f;   // -3 stops below grey (0.18 × 2^-3)
-            p.tone.shoulderIn = 4.000f;   // +4.5 stops above grey
-            p.tone.whitePoint = 5.760f;   // +5 stops above grey (0.18 × 2^5)
-            p.tone.toeOut = 0.080f;   // output at toe/straight boundary
-            p.tone.shoulderOut = 0.850f;   // output at straight/shoulder boundary
-            p.tone.midGamma = 0.950f;
+            // ── Per-channel H&D curves from sensitometric data ────────────────
+
+            // Red — lowest Dmax, compresses highlights earliest
+            p.tone.red.toeStartStops  = -5.0f;
+            p.tone.red.toeEndStops    = -3.0f;
+            p.tone.red.shoulderStops  =  6.0f;
+            p.tone.red.clipStops      =  7.5f;
+            p.tone.red.dMin           =  0.15f;
+            p.tone.red.dMax           =  1.80f;
+            p.tone.red.gamma          =  0.20f;
+
+            // Green — luminance reference, middle Dmax
+            p.tone.green.toeStartStops = -5.5f;
+            p.tone.green.toeEndStops   = -3.0f;
+            p.tone.green.shoulderStops =  6.5f;
+            p.tone.green.clipStops     =  8.0f;
+            p.tone.green.dMin          =  0.25f;
+            p.tone.green.dMax          =  2.30f;
+            p.tone.green.gamma         =  0.25f;
+
+            // Blue — highest Dmax, steepest gamma, rolls off earliest
+            p.tone.blue.toeStartStops  = -6.0f;
+            p.tone.blue.toeEndStops    = -3.0f;
+            p.tone.blue.shoulderStops  =  5.0f;
+            p.tone.blue.clipStops      =  7.0f;
+            p.tone.blue.dMin           =  0.45f;
+            p.tone.blue.dMax           =  2.85f;
+            p.tone.blue.gamma          =  0.30f;
+
+            // Film colour at full — user can dial down to 0 for tone-only
+            p.tone.filmColor = 1.0f;
 
             // Inter-layer coupling from published SMPTE density matrix data
             p.color.couplingMatrix = {
@@ -121,11 +132,6 @@ namespace MasterFilm {
 
             mPresets.push_back(p);
         }
-    }
-
-    void StockLibrary::registerSlide()
-    {
-        // Stocks will be added after Vision3 500T tone validation is complete.
     }
 
 } // namespace MasterFilm

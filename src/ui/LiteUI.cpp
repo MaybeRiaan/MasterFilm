@@ -62,10 +62,13 @@ FilmPreset toFilmPreset(double grain, double glow, double sharpness,
         p.acutance.kostinskyStrength = static_cast<float>((sharpness - 0.7) * 0.5);
     }
 
-    // ── Tone: contract/expand contrast around midpoint ────────────────────────
-    float contrast = static_cast<float>((tone - 0.5) * 0.4);
-    p.tone.toeOut = std::clamp(base.tone.toeOut + contrast * 0.05f, 0.02f, 0.15f);
-    p.tone.shoulderOut = std::clamp(base.tone.shoulderOut - contrast * 0.05f, 0.75f, 0.95f);
+    // ── Tone: scale gamma (contrast) across all channels ───────────────────────
+    // Slider midpoint (0.5) = stock default gamma. Below = less contrast,
+    // above = more. Scaling is multiplicative so channel ratios are preserved.
+    float gammaScale = static_cast<float>(0.7 + tone * 0.6);  // [0.7, 1.3]
+    p.tone.red.gamma   = base.tone.red.gamma   * gammaScale;
+    p.tone.green.gamma = base.tone.green.gamma * gammaScale;
+    p.tone.blue.gamma  = base.tone.blue.gamma  * gammaScale;
 
     // ── Color richness → saturation across all zones ──────────────────────────
     float satScale = static_cast<float>(0.5 + color * 1.0);  // [0.5, 1.5]
