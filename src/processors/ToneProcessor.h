@@ -1,33 +1,30 @@
 // src/processors/ToneProcessor.h
-// Pass 1: Per-channel H&D characteristic curve with scan encoding.
+// Pass 1: Per-channel H&D characteristic curve as a transfer function.
 //
 // Physical signal flow per pixel:
 //   encoded input → [CST → scene linear]
 //                 → log exposure (log2 relative to middle grey)
-//                 → H&D curve per channel (log exposure → density)
-//                 → film color blend (lerp R/B density toward G)
-//                 → scan encode (density → working space code value)
-//                 → output
+//                 → H&D curve per channel (stops → density)
+//                 → FULL curve inverse (density → original stops)
+//                 → equivalent linear (0.18 × 2^stops)
+//                 → film color blend
+//                 → [CST → encoded output]
 //
-// SCAN ENCODING — DUAL ANCHOR, SINGLE SCALE
+// FULL CURVE INVERSE
 // ─────────────────────────────────────────────────────────────────────────────
-// Two points on the GREEN channel's straight line define the scale:
+// The previous approach inverted only the straight-line region, which caused
+// lifted blacks because the toe's compression was not correctly unwound.
 //
-//   density at 0 stops      →  codeMidGrey
-//   density at shoulder     →  codeHighlight
+// The full inverse inverts each region (toe, straight, shoulder) separately:
+//   - Straight line: stops = (density - dToeEnd) / gamma + toeEndStops
+//   - Toe:           inverts the smoothstep to recover original stops
+//   - Shoulder:      inverts the smoothstep to recover original stops
 //
-//   scale = (codeHighlight - codeMidGrey) / (dHighG - dMidG)
-//
-// This single scale applies to ALL channels. Per-channel colour comes
-// from each channel producing DIFFERENT density values at the same
-// exposure — not from different encoding scales. This matches a real
-// scanner, which applies one transfer function regardless of which
-// emulsion layer it's reading.
-//
-// Each channel anchors its own dMid to codeMidGrey so that a neutral
-// grey card produces neutral output. Away from grey, the channels
-// diverge because their gammas, toe onsets, and shoulder onsets differ.
-// That divergence IS the film's colour signature.
+// In the straight-line region this is an identity (perfect pass-through).
+// In the toe, the inverse unwinding maps base fog (dMin) back to toeStart,
+// which maps to a deeply negative exposure → near-zero linear → true black.
+// In the shoulder, the inverse maps dMax back to clipStops, preserving
+// the full highlight rolloff.
 //
 // Film Color control:
 //   0.0 — all channels use green curve (pure tone, no colour shift)
@@ -60,34 +57,40 @@ namespace MasterFilm {
         ToneParams mParams;
 
         // LUT parameters — log2 stops domain
-        static constexpr int   kLUTSize = 1024;
-        static constexpr float kStopsMin = -8.0f;
-        static constexpr float kStopsMax =  9.0f;
+        static constexpr int   kLUTSize = 4096;
+        static constexpr float kStopsMin = -10.0f;
+        static constexpr float kStopsMax =  10.0f;
         static constexpr float kStopsRange = kStopsMax - kStopsMin;
 
         // Three LUTs — one per channel, indexed by log2 stops
+        // Output is equivalent linear after full curve inverse
         std::array<float, kLUTSize> mLUT_R;
         std::array<float, kLUTSize> mLUT_G;
         std::array<float, kLUTSize> mLUT_B;
 
-        // Per-channel density at middle grey (0 stops)
-        float mDMidR;
-        float mDMidG;
-        float mDMidB;
-
-        // Green channel density at shoulder onset (for scale derivation)
-        float mDHighG;
-
         void  rebuildLUTs();
+
+        // Forward H&D curve: stops → density
         float evaluateCurve(float logExposure, const ChannelCurve& curve) const;
+
+        // Full curve inverse: density → original stops
+        // Inverts toe, straight line, and shoulder separately
+        float inverseCurve(float density, const ChannelCurve& curve) const;
+
+        // Combined transfer: stops → density → inverse → equivalent stops → linear
+        float filmTransfer(float stops, const ChannelCurve& curve) const;
+
         float sampleLUT(float logExposure, const std::array<float, kLUTSize>& lut) const;
 
-        // Scan encoding
-        static float scanEncode(float density, float dMid,
-                                float codeMidGrey, float scale);
+        // Pre-computed curve geometry per channel (for inverse)
+        struct CurveGeometry {
+            float dToeEnd;
+            float dShoulder;
+            float dShoulderClamped;
+        };
+        CurveGeometry mGeomR, mGeomG, mGeomB;
 
-        static float getCodeMidGrey(ColorSpaceMode mode);
-        static float getCodeHighlight(ColorSpaceMode mode);
+        static CurveGeometry computeGeometry(const ChannelCurve& c);
     };
 
 } // namespace MasterFilm
