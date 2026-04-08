@@ -8,11 +8,11 @@
 //   4. Film color blend: lerp R/B density toward G density
 //   5. Exit ramp:        density → output code value (log-domain, no unit crossing)
 //
-// Exit ramp detail:
-//   density_delta = density - dMid          (deviation from middle-grey anchor)
-//   stops_out     = -(density_delta / gamma) (negative: more density = less light)
-//   stops_out     = -(density_delta / gamma)   (negate: more density = less output light)
-//   code_out      = codeMidGrey + stops_out * unitsPerStop
+// Exit ramp (Beer-Lambert transmission model):
+//   density_delta = density - dMid
+//   stops_out     = -density_delta * log2(10)   [T = 10^-D, normalised at dMid]
+//   lin_out       = 0.18 * 2^stops_out
+//   code_out      = fromLinear(lin_out, mode)   [exact CST — no linear approximation]
 
 #include "ToneProcessor.h"
 #include <cmath>
@@ -72,54 +72,21 @@ namespace MasterFilm {
         return lut[lo] + frac * (lut[hi] - lut[lo]);
     }
 
-    // ── Log-domain exit ramp ──────────────────────────────────────────────────────
-    // Converts a density value to an output code value without leaving log space.
-    // The negative sign accounts for the negative→positive inversion:
-    // higher density on the negative means less light in the positive.
-    float ToneProcessor::densityToCode(float density, float dMid,
-                                       float gamma,
-                                       float codeMidGrey,
-                                       float unitsPerStop)
+    // ── Exit ramp: density → output code ─────────────────────────────────────────
+    // Beer-Lambert transmission model: T = 10^-D, normalised at middle grey.
+    //   T_rel    = 10^(dMid - density)     → relative transmission
+    //   stops    = log2(T_rel)             = -(density - dMid) * log2(10)
+    //   lin_out  = 0.18 * 2^stops          → scene linear
+    //   code_out = fromLinear(lin_out)     → re-encode via exact CST
+    //
+    // Using log2(10) instead of 1/gamma ensures all channels use the same
+    // density-to-stop scale. Colour comes from density differences only.
+    float ToneProcessor::densityToCode(float density, float dMid, ColorSpaceMode mode)
     {
-        // density increases with exposure (negative behaviour).
-        // To produce a positive image, subtract density FROM dMid —
-        // this inverts the negative: high density → below anchor → darker output.
-        // The film's characteristic shape is preserved in the non-linearity
-        // of how density deviates from dMid across the stop range.
-        // density - dMid is positive for bright inputs, negative for dark.
-        // Dividing by gamma converts density units back to stop units.
-        // Result: bright inputs produce positive stopsOut (stay bright, compressed),
-        //         dark inputs produce negative stopsOut (stay dark, lifted at toe).
-        // Film negative: density increases with exposure.
-        // To produce a positive image we invert — more density above the anchor
-        // means less output light. Negating stopsOut achieves this:
-        // bright input → high density → negative stopsOut → output below anchor → compressed highlight
-        // dark input   → low density  → positive stopsOut → output above anchor → lifted shadow (toe)
         const float densityDelta = density - dMid;
-        const float stopsOut     = -(densityDelta / gamma);
-        return codeMidGrey + stopsOut * unitsPerStop;
-    }
-
-    // ── Color space anchors ───────────────────────────────────────────────────────
-
-    float ToneProcessor::getCodeMidGrey(ColorSpaceMode mode)
-    {
-        switch (mode)
-        {
-        case ColorSpaceMode::ACEScct:          return 0.4135f;
-        case ColorSpaceMode::DaVinciWideGamut: return 0.5000f;
-        }
-        return 0.4135f;
-    }
-
-    float ToneProcessor::getUnitsPerStop(ColorSpaceMode mode)
-    {
-        switch (mode)
-        {
-        case ColorSpaceMode::ACEScct:          return kACESPerStop;
-        case ColorSpaceMode::DaVinciWideGamut: return kDWGPerStop;
-        }
-        return kACESPerStop;
+        const float stopsOut     = -densityDelta * kLog2of10;
+        const float linOut       = 0.18f * std::pow(2.0f, stopsOut);
+        return CST::fromLinear(std::max(linOut, 1e-10f), mode);
     }
 
     // ── CPU processing ────────────────────────────────────────────────────────────
@@ -128,17 +95,8 @@ namespace MasterFilm {
         int nComponents,
         ColorSpaceMode mode) const
     {
-        const int   nPixels      = width * height;
-        const float filmColor    = mParams.filmColor;
-        const float codeMidGrey  = getCodeMidGrey(mode);
-        const float unitsPerStop = getUnitsPerStop(mode);
-
-        // Per-channel gammas — needed by exit ramp at pixel level.
-        // These may have been scaled by LiteUI's gammaScale, so read
-        // from mParams rather than hardcoding datasheet values.
-        const float gammaR = mParams.red.gamma;
-        const float gammaG = mParams.green.gamma;
-        const float gammaB = mParams.blue.gamma;
+        const int   nPixels   = width * height;
+        const float filmColor = mParams.filmColor;
 
         const float dMidR = mDMidR;
         const float dMidG = mDMidG;
@@ -178,10 +136,10 @@ namespace MasterFilm {
                 blendDMidB = dMidG + filmColor * (dMidB - dMidG);
             }
 
-            // 5. Log-domain exit ramp → output code values
-            d[0] = densityToCode(rDensity, blendDMidR, gammaR, codeMidGrey, unitsPerStop);
-            d[1] = densityToCode(gDensity, dMidG,      gammaG, codeMidGrey, unitsPerStop);
-            d[2] = densityToCode(bDensity, blendDMidB, gammaB, codeMidGrey, unitsPerStop);
+            // 5. Exit ramp → output code values
+            d[0] = densityToCode(rDensity, blendDMidR, mode);
+            d[1] = densityToCode(gDensity, dMidG,      mode);
+            d[2] = densityToCode(bDensity, blendDMidB, mode);
 
             if (nc == 4) d[3] = s[3];
         };

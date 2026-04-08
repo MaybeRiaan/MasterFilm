@@ -8,20 +8,30 @@
 //     → log2(lin / 0.18)            scene linear → stops relative to middle grey
 //     → sigmoid H&D curve           stops → density (per-channel)
 //     → filmColor blend             lerp R/B density toward G
-//     → -(density_delta / gamma)    density → stops out  (log-domain exit ramp)
-//     → fromLinear(0.18 * 2^stops)  stops → scene linear → re-encode
+//     → -densityDelta * log2(10)    density → stops out  (Beer-Lambert T = 10^-D)
+//     → fromLinear(0.18 * 2^stops)  stops → scene linear → re-encode (exact CST)
 //     → encoded output
 //
-// EXIT RAMP — WHY LOG DOMAIN
+// EXIT RAMP — BEER-LAMBERT TRANSMISSION MODEL
 // ─────────────────────────────────────────────────────────────────────────────
-// Previous approaches tried to convert density back to scene-linear radiance
-// via fromLinear(). This fails because density is not radiometric — it is an
-// optical property. The unit mismatch produced clipping and distortion.
+// The positive image density D determines film transmission: T = 10^-D.
+// Normalising against middle-grey density dMid:
+//   T_rel = 10^-(D - dMid)  = 10^(dMid - D)
+// Converting to scene-linear stops (output):
+//   stops_out = log2(T_rel) = -(D - dMid) * log2(10) = -densityDelta * 3.322
+// Then reconstructing the scene-linear value and re-encoding via CST:
+//   lin_out  = 0.18 * 2^stops_out
+//   code_out = fromLinear(lin_out, mode)
 //
-// Instead: express the density change as a stop delta from middle grey,
-// then convert that stop delta back to a code value. The gamma parameter
-// (density/stop) is the bridge — dividing density_delta by gamma gives stops.
-// This keeps the entire pipeline in log/stop space with no unit crossing.
+// KEY DIFFERENCE FROM THE PREVIOUS -(densityDelta / gamma) APPROACH:
+//   - The old approach used 1/gamma as the scale, which varies per channel
+//     (red=5.0, green=4.0, blue=3.33). This amplified per-channel differences,
+//     causing green to spike above blue in highlights.
+//   - log2(10) ≈ 3.322 is the same for all channels. Colour character now
+//     comes from density differences alone (the forward curve shape), not from
+//     the gamma divisor appearing a second time in the exit ramp.
+//   - The fromLinear call is exact for both ACEScct and DWG — no codeMidGrey
+//     or unitsPerStop approximations needed.
 //
 // SIGMOID CURVE MODEL
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,16 +82,11 @@ namespace MasterFilm {
         static constexpr float kStopsMax  =  9.0f;
         static constexpr float kStopsRange = kStopsMax - kStopsMin;
 
-        // ACEScct units per one stop — used for the log-domain exit ramp.
-        // Derived from the ACEScct log segment: d(cct)/d(stops) = log2(e) * 17.52 / (ln(2) * ... )
-        // Simplified: one stop = 1/17.52 in ACEScct log space.
-        // Validated in standalone test: middle grey ±1 stop = ±0.0816 ACEScct.
-        static constexpr float kACESPerStop = 1.0f / 17.52f;  // ≈ 0.05709
-
-        // DaVinci Intermediate units per stop at middle grey (0.5 encoded).
-        // DWG log segment: cct = DI_C * (log2(lin + DI_A) + DI_B)
-        // d(cct)/d(log2(lin)) = DI_C = 0.07329248
-        static constexpr float kDWGPerStop  = 0.07329248f;
+        // Physical density → stop scale factor (Beer-Lambert law: T = 10^-D)
+        // d(stops_out)/d(density) = d(log2(T_rel))/d(D) = -log2(10)
+        // Using this constant for all channels ensures colour character comes
+        // from density differences alone, not from the gamma divisor.
+        static constexpr float kLog2of10 = 3.321928f;  // log2(10)
 
         // Three LUTs — one per channel, indexed by log2 stops
         // Stores DENSITY values, not output code values.
@@ -101,17 +106,12 @@ namespace MasterFilm {
         static float evaluateCurve(float stops, const ChannelCurve& c);
         float        sampleLUT(float stops, const std::array<float, kLUTSize>& lut) const;
 
-        // Log-domain exit ramp: density → output code value
+        // Exit ramp: density → output code value via exact Beer-Lambert transmission.
         // density_delta = density - density_at_middle_grey
-        // stops_out     = -(density_delta / gamma)
-        // code_out      = codeMidGrey + stops_out * unitsPerStop
-        static float densityToCode(float density, float dMid,
-                                   float gamma,
-                                   float codeMidGrey,
-                                   float unitsPerStop);
-
-        static float getCodeMidGrey(ColorSpaceMode mode);
-        static float getUnitsPerStop(ColorSpaceMode mode);
+        // stops_out     = -density_delta * log2(10)   [T = 10^-D transmission model]
+        // lin_out       = 0.18 * 2^stops_out
+        // code_out      = fromLinear(lin_out, mode)   [exact, no linear approximation]
+        static float densityToCode(float density, float dMid, ColorSpaceMode mode);
     };
 
 } // namespace MasterFilm
