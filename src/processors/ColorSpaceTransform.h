@@ -34,48 +34,36 @@ namespace MasterFilm {
         // Output is clamped to >= 0. Encoded values below the ACEScct black floor
         // (0.0729) produce negative linear values from the piecewise formula —
         // these are sub-black and have no physical meaning in this context.
+        // ACEScct encoded value → scene linear
+        // Source: Academy S-2014-003 (verified against OCIO source)
         inline float acesCCT_to_linear(float v)
         {
-            constexpr float CUT2 = 0.155251141552511f;  // encoded cut point (linear segment below)
-            constexpr float A = 10.5402377416672f;
-            constexpr float B = 0.0729055341958355f;  // encoded black floor
-            constexpr float C = 0.0570776999f;        // log segment scale
+            // cut point: (log2(0.0078125) + 9.72) / 17.52 = 0.155251...
+            constexpr float CUT_CCT = 0.155251141552511f;
+            constexpr float A       = 10.5402377416672f;
+            constexpr float B       = 0.0729055341958355f;
 
             float result;
-            if (v <= CUT2)
-            {
-                // Linear segment: very deep shadows
-                result = (v - B) / A;
-            }
+            if (v <= CUT_CCT)
+                result = (v - B) / A;           // linear segment
             else
-            {
-                // Log segment: (2^((v - 0.413088) / 0.057077) - 2^-15) / 17.52
-                result = (std::pow(2.0f, (v - 0.413088f) / C) - std::pow(2.0f, -15.0f)) / 17.52f;
-            }
+                result = std::pow(2.0f, v * 17.52f - 9.72f);   // log segment
 
-            // Clamp sub-black to zero — below-floor inputs have no valid linear
-            // representation and would otherwise cause a hard clip artefact.
             return std::max(result, 0.0f);
         }
 
         // Scene linear → ACEScct encoded value
+        // Source: Academy S-2014-003
         inline float linear_to_acesCCT(float v)
         {
-            constexpr float CUT1 = 0.0078125f;           // linear cut point (linear segment below)
-            constexpr float A = 10.5402377416672f;
-            constexpr float B = 0.0729055341958355f;
-            constexpr float C = 0.0570776999f;
+            constexpr float CUT_LIN = 0.0078125f;
+            constexpr float A       = 10.5402377416672f;
+            constexpr float B       = 0.0729055341958355f;
 
-            if (v <= CUT1)
-            {
-                // Linear segment
-                return A * v + B;
-            }
+            if (v <= CUT_LIN)
+                return A * v + B;               // linear segment
             else
-            {
-                // Log segment: 0.057077 * log2(v * 17.52 + 2^-15) + 0.413088
-                return C * std::log2(v * 17.52f + std::pow(2.0f, -15.0f)) + 0.413088f;
-            }
+                return (std::log2(std::max(v, 1e-10f)) + 9.72f) / 17.52f;  // log segment
         }
 
         // =============================================================================

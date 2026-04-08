@@ -1,35 +1,18 @@
 // src/processors/ToneProcessor.cpp
-// Per-channel H&D characteristic curve with full curve inverse.
+// Per-channel H&D characteristic curve, log-domain pipeline.
 //
 // Signal flow per pixel:
-//   1. Forward CST: encoded → scene linear
-//   2. Log exposure: scene linear → log2 stops relative to 0.18
-//   3. Film transfer per channel:
-//      a. H&D curve: stops → density (forward)
-//      b. Full inverse: density → recovered stops (inverts all regions)
-//      c. Equivalent linear: 0.18 × 2^recoveredStops
-//   4. Film color blend: lerp R/B equivalent linear toward G
-//   5. Inverse CST: equivalent linear → encoded output
+//   1. Forward CST:      encoded → scene linear
+//   2. Log exposure:     scene linear → log2 stops relative to middle grey (0.18)
+//   3. H&D curve:        stops → density (sigmoid, per-channel LUT)
+//   4. Film color blend: lerp R/B density toward G density
+//   5. Exit ramp:        density → output code value (log-domain, no unit crossing)
 //
-// FULL CURVE INVERSE
-// ─────────────────────────────────────────────────────────────────────────────
-// The forward curve has three regions:
-//   Toe:      smoothstep from dMin to dToeEnd      (toeStart..toeEnd stops)
-//   Straight: linear at gamma slope                 (toeEnd..shoulder stops)
-//   Shoulder: smoothstep from dShoulder to dMax     (shoulder..clip stops)
-//
-// The inverse maps density back to stops by detecting which region the
-// density falls in and inverting that region's function:
-//
-//   density <= dMin      → toeStartStops (true black)
-//   density < dToeEnd    → inverse smoothstep in toe region
-//   density < dShoulder  → linear inverse: (density - dToeEnd) / gamma + toeEnd
-//   density < dMax       → inverse smoothstep in shoulder region
-//   density >= dMax      → clipStops
-//
-// The inverse smoothstep uses the analytical inverse of t²(3-2t):
-//   t = 0.5 - sin(asin(1 - 2*y) / 3)
-// where y is the normalised density within the region.
+// Exit ramp detail:
+//   density_delta = density - dMid          (deviation from middle-grey anchor)
+//   stops_out     = -(density_delta / gamma) (negative: more density = less light)
+//   stops_out     = -(density_delta / gamma)   (negate: more density = less output light)
+//   code_out      = codeMidGrey + stops_out * unitsPerStop
 
 #include "ToneProcessor.h"
 #include <cmath>
@@ -37,152 +20,106 @@
 
 namespace MasterFilm {
 
-    // ── Curve geometry ────────────────────────────────────────────────────────────
-    ToneProcessor::CurveGeometry ToneProcessor::computeGeometry(const ChannelCurve& c)
-    {
-        CurveGeometry g;
-        g.dToeEnd   = c.dMin + c.gamma * (c.toeEndStops - c.toeStartStops) * 0.3f;
-        g.dShoulder = g.dToeEnd + c.gamma * (c.shoulderStops - c.toeEndStops);
-        g.dShoulderClamped = std::min(g.dShoulder, c.dMax);
-        return g;
-    }
-
-    // ── Forward H&D curve ─────────────────────────────────────────────────────────
-    float ToneProcessor::evaluateCurve(float logExp, const ChannelCurve& c) const
-    {
-        const CurveGeometry* g;
-        // Select the right pre-computed geometry
-        // (We can't easily pass it, so recompute — it's only used in LUT bake)
-        CurveGeometry local = computeGeometry(c);
-        g = &local;
-
-        if (logExp <= c.toeStartStops)
-            return c.dMin;
-
-        // Toe — smoothstep from dMin to dToeEnd
-        if (logExp < c.toeEndStops)
-        {
-            float t = (logExp - c.toeStartStops) / (c.toeEndStops - c.toeStartStops);
-            t = std::clamp(t, 0.0f, 1.0f);
-            float shaped = t * t * (3.0f - 2.0f * t);
-            return c.dMin + (g->dToeEnd - c.dMin) * shaped;
-        }
-
-        // Shoulder — smoothstep from dShoulder to dMax
-        if (logExp >= c.shoulderStops)
-        {
-            if (logExp >= c.clipStops)
-                return c.dMax;
-
-            float t = (logExp - c.shoulderStops) / (c.clipStops - c.shoulderStops);
-            t = std::clamp(t, 0.0f, 1.0f);
-            float shaped = t * t * (3.0f - 2.0f * t);
-            return g->dShoulderClamped + (c.dMax - g->dShoulderClamped) * shaped;
-        }
-
-        // Straight line
-        return g->dToeEnd + c.gamma * (logExp - c.toeEndStops);
-    }
-
-    // ── Inverse smoothstep ────────────────────────────────────────────────────────
-    // Analytical inverse of y = t²(3-2t) for y in [0,1], returns t in [0,1].
-    // Uses the identity: inverse smoothstep = 0.5 - sin(asin(1-2y) / 3)
-    static float inverseSmoothstep(float y)
-    {
-        y = std::clamp(y, 0.0f, 1.0f);
-        if (y <= 0.0f) return 0.0f;
-        if (y >= 1.0f) return 1.0f;
-        return 0.5f - std::sin(std::asin(1.0f - 2.0f * y) / 3.0f);
-    }
-
-    // ── Full curve inverse ────────────────────────────────────────────────────────
-    // density → original stops
-    // Inverts each region of the forward curve separately.
-    float ToneProcessor::inverseCurve(float density, const ChannelCurve& c) const
-    {
-        CurveGeometry g = computeGeometry(c);
-
-        // At or below base fog → toeStart (deepest shadow)
-        if (density <= c.dMin)
-            return c.toeStartStops;
-
-        // Toe region: density in [dMin, dToeEnd]
-        if (density < g.dToeEnd)
-        {
-            // Forward: density = dMin + (dToeEnd - dMin) * smoothstep(t)
-            // where t = (stops - toeStart) / (toeEnd - toeStart)
-            float y = (density - c.dMin) / (g.dToeEnd - c.dMin);
-            float t = inverseSmoothstep(y);
-            return c.toeStartStops + t * (c.toeEndStops - c.toeStartStops);
-        }
-
-        // Shoulder region: density in [dShoulder, dMax]
-        if (density >= g.dShoulderClamped)
-        {
-            if (density >= c.dMax)
-                return c.clipStops;
-
-            // Forward: density = dShoulder + (dMax - dShoulder) * smoothstep(t)
-            // where t = (stops - shoulder) / (clip - shoulder)
-            float y = (density - g.dShoulderClamped) / (c.dMax - g.dShoulderClamped);
-            float t = inverseSmoothstep(y);
-            return c.shoulderStops + t * (c.clipStops - c.shoulderStops);
-        }
-
-        // Straight line: density = dToeEnd + gamma * (stops - toeEnd)
-        return c.toeEndStops + (density - g.dToeEnd) / c.gamma;
-    }
-
-    // ── Film transfer ─────────────────────────────────────────────────────────────
-    // stops → density → inverse → recovered stops → equivalent linear
+    // ── Sigmoid H&D curve ─────────────────────────────────────────────────────────
+    // Positive characteristic curve (negative inverted):
+    // D = dMax - (dMax - dMin) / (1 + exp(-k * (stops - x0)))
     //
-    // In the straight-line region: identity (input stops = output stops).
-    // In the toe: compression → shadows darken.
-    // In the shoulder: compression → highlights roll off.
-    // At dMin: returns toeStartStops → very small linear value → near black.
-    float ToneProcessor::filmTransfer(float stops, const ChannelCurve& curve) const
+    // Subtracting from dMax flips the curve so that:
+    //   high exposure (bright input)  → low density  → bright output
+    //   low exposure  (dark input)    → high density  → dark output
+    //
+    // This models the full negative→positive inversion in the curve shape
+    // rather than as a separate sign flip in the exit ramp.
+    // k = 4 * gamma / (dMax - dMin)  matches slope at inflection to datasheet gamma
+    float ToneProcessor::evaluateCurve(float stops, const ChannelCurve& c)
     {
-        float density = evaluateCurve(stops, curve);
-        float recoveredStops = inverseCurve(density, curve);
-
-        constexpr float kMiddleGrey = 0.18f;
-        float equivalentLinear = kMiddleGrey * std::pow(2.0f, recoveredStops);
-
-        return std::max(equivalentLinear, 0.0f);
+        const float k = 4.0f * c.gamma / (c.dMax - c.dMin);
+        return c.dMax - (c.dMax - c.dMin) / (1.0f + std::exp(-k * (stops - c.x0)));
     }
 
     // ── LUT bake ──────────────────────────────────────────────────────────────────
+    // Stores raw density values — exit ramp applied per-pixel at render time.
     void ToneProcessor::rebuildLUTs()
     {
-        // Pre-compute curve geometry
-        mGeomR = computeGeometry(mParams.red);
-        mGeomG = computeGeometry(mParams.green);
-        mGeomB = computeGeometry(mParams.blue);
-
         for (int i = 0; i < kLUTSize; ++i)
         {
-            float stops = kStopsMin + (static_cast<float>(i) / static_cast<float>(kLUTSize - 1))
-                        * kStopsRange;
+            const float stops = kStopsMin
+                + (static_cast<float>(i) / static_cast<float>(kLUTSize - 1))
+                * kStopsRange;
 
-            mLUT_R[i] = filmTransfer(stops, mParams.red);
-            mLUT_G[i] = filmTransfer(stops, mParams.green);
-            mLUT_B[i] = filmTransfer(stops, mParams.blue);
+            mLUT_R[i] = evaluateCurve(stops, mParams.red);
+            mLUT_G[i] = evaluateCurve(stops, mParams.green);
+            mLUT_B[i] = evaluateCurve(stops, mParams.blue);
         }
+
+        // Density at 0 stops (middle grey) — per-channel anchors for exit ramp
+        mDMidR = evaluateCurve(0.0f, mParams.red);
+        mDMidG = evaluateCurve(0.0f, mParams.green);
+        mDMidB = evaluateCurve(0.0f, mParams.blue);
     }
 
     // ── LUT sampler ───────────────────────────────────────────────────────────────
-    float ToneProcessor::sampleLUT(float logExp,
+    float ToneProcessor::sampleLUT(float stops,
                                    const std::array<float, kLUTSize>& lut) const
     {
-        float normalised = (std::clamp(logExp, kStopsMin, kStopsMax) - kStopsMin) / kStopsRange;
-        float fi = normalised * static_cast<float>(kLUTSize - 1);
+        const float norm = (std::clamp(stops, kStopsMin, kStopsMax) - kStopsMin) / kStopsRange;
+        const float fi   = norm * static_cast<float>(kLUTSize - 1);
 
-        int lo = static_cast<int>(fi);
-        int hi = lo + 1;
-        if (hi >= kLUTSize) hi = kLUTSize - 1;
+        const int lo   = static_cast<int>(fi);
+        const int hi   = std::min(lo + 1, kLUTSize - 1);
+        const float frac = fi - static_cast<float>(lo);
 
-        float frac = fi - static_cast<float>(lo);
         return lut[lo] + frac * (lut[hi] - lut[lo]);
+    }
+
+    // ── Log-domain exit ramp ──────────────────────────────────────────────────────
+    // Converts a density value to an output code value without leaving log space.
+    // The negative sign accounts for the negative→positive inversion:
+    // higher density on the negative means less light in the positive.
+    float ToneProcessor::densityToCode(float density, float dMid,
+                                       float gamma,
+                                       float codeMidGrey,
+                                       float unitsPerStop)
+    {
+        // density increases with exposure (negative behaviour).
+        // To produce a positive image, subtract density FROM dMid —
+        // this inverts the negative: high density → below anchor → darker output.
+        // The film's characteristic shape is preserved in the non-linearity
+        // of how density deviates from dMid across the stop range.
+        // density - dMid is positive for bright inputs, negative for dark.
+        // Dividing by gamma converts density units back to stop units.
+        // Result: bright inputs produce positive stopsOut (stay bright, compressed),
+        //         dark inputs produce negative stopsOut (stay dark, lifted at toe).
+        // Film negative: density increases with exposure.
+        // To produce a positive image we invert — more density above the anchor
+        // means less output light. Negating stopsOut achieves this:
+        // bright input → high density → negative stopsOut → output below anchor → compressed highlight
+        // dark input   → low density  → positive stopsOut → output above anchor → lifted shadow (toe)
+        const float densityDelta = density - dMid;
+        const float stopsOut     = -(densityDelta / gamma);
+        return codeMidGrey + stopsOut * unitsPerStop;
+    }
+
+    // ── Color space anchors ───────────────────────────────────────────────────────
+
+    float ToneProcessor::getCodeMidGrey(ColorSpaceMode mode)
+    {
+        switch (mode)
+        {
+        case ColorSpaceMode::ACEScct:          return 0.4135f;
+        case ColorSpaceMode::DaVinciWideGamut: return 0.5000f;
+        }
+        return 0.4135f;
+    }
+
+    float ToneProcessor::getUnitsPerStop(ColorSpaceMode mode)
+    {
+        switch (mode)
+        {
+        case ColorSpaceMode::ACEScct:          return kACESPerStop;
+        case ColorSpaceMode::DaVinciWideGamut: return kDWGPerStop;
+        }
+        return kACESPerStop;
     }
 
     // ── CPU processing ────────────────────────────────────────────────────────────
@@ -191,83 +128,77 @@ namespace MasterFilm {
         int nComponents,
         ColorSpaceMode mode) const
     {
-        const int   nPixels = width * height;
-        const float filmColor = mParams.filmColor;
+        const int   nPixels      = width * height;
+        const float filmColor    = mParams.filmColor;
+        const float codeMidGrey  = getCodeMidGrey(mode);
+        const float unitsPerStop = getUnitsPerStop(mode);
+
+        // Per-channel gammas — needed by exit ramp at pixel level.
+        // These may have been scaled by LiteUI's gammaScale, so read
+        // from mParams rather than hardcoding datasheet values.
+        const float gammaR = mParams.red.gamma;
+        const float gammaG = mParams.green.gamma;
+        const float gammaB = mParams.blue.gamma;
+
+        const float dMidR = mDMidR;
+        const float dMidG = mDMidG;
+        const float dMidB = mDMidB;
+
+        constexpr float kFloor      = 1e-10f;
+        constexpr float kMiddleGrey = 0.18f;
+
+        auto processPixel = [&](const float* s, float* d, int nc)
+        {
+            // 1. Forward CST → scene linear
+            const float rLin = CST::toLinear(s[0], mode);
+            const float gLin = CST::toLinear(s[1], mode);
+            const float bLin = CST::toLinear(s[2], mode);
+
+            // 2. Scene linear → log2 stops relative to middle grey
+            const float rStops = std::log2(std::max(rLin, kFloor) / kMiddleGrey);
+            const float gStops = std::log2(std::max(gLin, kFloor) / kMiddleGrey);
+            const float bStops = std::log2(std::max(bLin, kFloor) / kMiddleGrey);
+
+            // 3. H&D curve → density (per-channel LUT)
+            float rDensity = sampleLUT(rStops, mLUT_R);
+            float gDensity = sampleLUT(gStops, mLUT_G);
+            float bDensity = sampleLUT(bStops, mLUT_B);
+
+            // 4. Film color blend — lerp R/B toward green curve at same exposure
+            float blendDMidR = dMidR;
+            float blendDMidB = dMidB;
+
+            if (filmColor < 1.0f)
+            {
+                const float gForR = sampleLUT(rStops, mLUT_G);
+                const float gForB = sampleLUT(bStops, mLUT_G);
+                rDensity   = gForR + filmColor * (rDensity - gForR);
+                bDensity   = gForB + filmColor * (bDensity - gForB);
+                blendDMidR = dMidG + filmColor * (dMidR - dMidG);
+                blendDMidB = dMidG + filmColor * (dMidB - dMidG);
+            }
+
+            // 5. Log-domain exit ramp → output code values
+            d[0] = densityToCode(rDensity, blendDMidR, gammaR, codeMidGrey, unitsPerStop);
+            d[1] = densityToCode(gDensity, dMidG,      gammaG, codeMidGrey, unitsPerStop);
+            d[2] = densityToCode(bDensity, blendDMidB, gammaB, codeMidGrey, unitsPerStop);
+
+            if (nc == 4) d[3] = s[3];
+        };
 
         if (nComponents == 4)
         {
             const float* s = src;
-            float* d = dst;
-
+            float*       d = dst;
             for (int p = 0; p < nPixels; ++p, s += 4, d += 4)
-            {
-                // 1. Forward CST → scene linear
-                float rLin = CST::toLinear(s[0], mode);
-                float gLin = CST::toLinear(s[1], mode);
-                float bLin = CST::toLinear(s[2], mode);
-
-                // 2. Scene linear → log2 stops
-                constexpr float kFloor = 1e-10f;
-                constexpr float kMiddleGrey = 0.18f;
-                float rStops = std::log2(std::max(rLin, kFloor) / kMiddleGrey);
-                float gStops = std::log2(std::max(gLin, kFloor) / kMiddleGrey);
-                float bStops = std::log2(std::max(bLin, kFloor) / kMiddleGrey);
-
-                // 3. Film transfer → equivalent linear (per-channel LUT)
-                float rOut = sampleLUT(rStops, mLUT_R);
-                float gOut = sampleLUT(gStops, mLUT_G);
-                float bOut = sampleLUT(bStops, mLUT_B);
-
-                // 4. Film color blend — lerp R/B toward G
-                if (filmColor < 1.0f)
-                {
-                    float gOutForR = sampleLUT(rStops, mLUT_G);
-                    float gOutForB = sampleLUT(bStops, mLUT_G);
-                    rOut = gOutForR + filmColor * (rOut - gOutForR);
-                    bOut = gOutForB + filmColor * (bOut - gOutForB);
-                }
-
-                // 5. Inverse CST → encoded output
-                d[0] = CST::fromLinear(rOut, mode);
-                d[1] = CST::fromLinear(gOut, mode);
-                d[2] = CST::fromLinear(bOut, mode);
-                d[3] = s[3];
-            }
+                processPixel(s, d, 4);
         }
         else if (nComponents == 3)
         {
             const float* s = src;
-            float* d = dst;
-
+            float*       d = dst;
             for (int p = 0; p < nPixels; ++p, s += 3, d += 3)
-            {
-                constexpr float kFloor = 1e-10f;
-                constexpr float kMiddleGrey = 0.18f;
-
-                float rLin = CST::toLinear(s[0], mode);
-                float gLin = CST::toLinear(s[1], mode);
-                float bLin = CST::toLinear(s[2], mode);
-
-                float rStops = std::log2(std::max(rLin, kFloor) / kMiddleGrey);
-                float gStops = std::log2(std::max(gLin, kFloor) / kMiddleGrey);
-                float bStops = std::log2(std::max(bLin, kFloor) / kMiddleGrey);
-
-                float rOut = sampleLUT(rStops, mLUT_R);
-                float gOut = sampleLUT(gStops, mLUT_G);
-                float bOut = sampleLUT(bStops, mLUT_B);
-
-                if (filmColor < 1.0f)
-                {
-                    float gOutForR = sampleLUT(rStops, mLUT_G);
-                    float gOutForB = sampleLUT(bStops, mLUT_G);
-                    rOut = gOutForR + filmColor * (rOut - gOutForR);
-                    bOut = gOutForB + filmColor * (bOut - gOutForB);
-                }
-
-                d[0] = CST::fromLinear(rOut, mode);
-                d[1] = CST::fromLinear(gOut, mode);
-                d[2] = CST::fromLinear(bOut, mode);
-            }
+                processPixel(s, d, 3);
         }
 
         return kOfxStatOK;

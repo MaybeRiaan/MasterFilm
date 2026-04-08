@@ -13,10 +13,11 @@
 //   dMin:      0.15        0.25        0.45       base fog
 //   dMax:      1.80        2.30        2.85       max density
 //   gamma:     0.20        0.25        0.30       density/stop (straight line)
-//   toeStart: -5.0        -5.5        -6.0       lifts off base fog
-//   toeEnd:   -3.0        -3.0        -3.0       enters straight line
-//   shoulder: +6.0        +6.5        +5.0       exits straight line
-//   clip:     +7.5        +8.0        +7.0       reaches Dmax
+//   toeEnd:   -3.0        -3.0        -3.0       enters straight line (for x0)
+//   shoulder: +6.0        +6.5        +5.0       exits straight line (for x0)
+//   x0:        1.50        1.75        1.00       sigmoid inflection = (toeEnd+shoulder)/2
+//
+// Piecewise toeStart/clip fields removed — sigmoid model does not need them.
 //
 // Green channel is the luminance reference. Red and blue diverge to
 // produce the stock's colour signature — controlled by filmColor param.
@@ -85,34 +86,32 @@ namespace MasterFilm {
             p.acutance.intensity = 0.44f;
             p.acutance.rolloff = 0.52f;
 
-            // ── Per-channel H&D curves from sensitometric data ────────────────
+            // ── Per-channel H&D curves (sigmoid model) ───────────────────────
+            // Source: Kodak Vision3 500T datasheet H-1-5219, ECN-2 process
+            // Sigmoid: D = dMin + (dMax-dMin) / (1 + exp(-k*(stops-x0)))
+            // k = 4*gamma/(dMax-dMin)  derived at runtime
+            // x0 = (toeEnd + shoulder) / 2  from datasheet geometry
 
             // Red — lowest Dmax, compresses highlights earliest
-            p.tone.red.toeStartStops  = -5.0f;
-            p.tone.red.toeEndStops    = -3.0f;
-            p.tone.red.shoulderStops  =  6.0f;
-            p.tone.red.clipStops      =  7.5f;
-            p.tone.red.dMin           =  0.15f;
-            p.tone.red.dMax           =  1.80f;
-            p.tone.red.gamma          =  0.20f;
+            // toeEnd=-3.0, shoulder=+6.0 → x0=1.50
+            p.tone.red.dMin  =  0.15f;
+            p.tone.red.dMax  =  1.80f;
+            p.tone.red.gamma =  0.20f;
+            p.tone.red.x0    =  1.50f;
 
             // Green — luminance reference, middle Dmax
-            p.tone.green.toeStartStops = -5.5f;
-            p.tone.green.toeEndStops   = -3.0f;
-            p.tone.green.shoulderStops =  6.5f;
-            p.tone.green.clipStops     =  8.0f;
-            p.tone.green.dMin          =  0.25f;
-            p.tone.green.dMax          =  2.30f;
-            p.tone.green.gamma         =  0.25f;
+            // toeEnd=-3.0, shoulder=+6.5 → x0=1.75
+            p.tone.green.dMin  =  0.25f;
+            p.tone.green.dMax  =  2.30f;
+            p.tone.green.gamma =  0.25f;
+            p.tone.green.x0    =  1.75f;
 
             // Blue — highest Dmax, steepest gamma, rolls off earliest
-            p.tone.blue.toeStartStops  = -6.0f;
-            p.tone.blue.toeEndStops    = -3.0f;
-            p.tone.blue.shoulderStops  =  5.0f;
-            p.tone.blue.clipStops      =  7.0f;
-            p.tone.blue.dMin           =  0.45f;
-            p.tone.blue.dMax           =  2.85f;
-            p.tone.blue.gamma          =  0.30f;
+            // toeEnd=-3.0, shoulder=+5.0 → x0=1.00
+            p.tone.blue.dMin  =  0.45f;
+            p.tone.blue.dMax  =  2.85f;
+            p.tone.blue.gamma =  0.30f;
+            p.tone.blue.x0    =  1.00f;
 
             // Film colour at full — user can dial down to 0 for tone-only
             p.tone.filmColor = 1.0f;

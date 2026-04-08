@@ -115,19 +115,27 @@ namespace MasterFilm {
 
     // Per-channel characteristic curve parameters.
     // One instance per emulsion layer (R, G, B).
+    //
+    // The H&D curve is modelled as a sigmoid (modified Richards curve):
+    //   D = dMin + (dMax - dMin) / (1 + exp(-k * (stops - x0)))
+    //
+    // where:
+    //   k  = 4 * gamma / (dMax - dMin)   — derived at runtime, matches straight-line slope
+    //   x0 = (toeEndStops + shoulderStops) / 2  — inflection point
+    //
+    // This replaces the piecewise toe/straight/shoulder model which required
+    // an arbitrary 0.3f junction approximation.
     struct ChannelCurve {
-        // Input — camera stops relative to middle grey (0.18 = 0 stops)
-        float toeStartStops  = -6.0f;   // curve lifts off base fog
-        float toeEndStops    = -3.0f;   // toe → straight transition
-        float shoulderStops  =  6.0f;   // straight → shoulder transition
-        float clipStops      =  8.0f;   // curve reaches Dmax
+        // Density — absolute Status-M values from published datasheet
+        float dMin  =  0.20f;  // base fog density
+        float dMax  =  2.40f;  // maximum density (saturation)
 
-        // Density — absolute Status-M values from published data
-        float dMin           =  0.20f;  // base fog
-        float dMax           =  2.40f;  // maximum density
+        // Shape — straight-line slope from sensitometric chart
+        float gamma =  0.25f;  // density per stop
 
-        // Shape
-        float gamma          =  0.25f;  // density per stop in straight-line region
+        // Sigmoid inflection point in stops relative to middle grey.
+        // Set to (toeEndStops + shoulderStops) / 2 from datasheet geometry.
+        float x0    =  1.75f;  // stops — green 500T default
     };
 
     struct ToneParams {
