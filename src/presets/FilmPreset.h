@@ -172,6 +172,7 @@ namespace MasterFilm {
         float satShadow = 1.0f;
         float satMid = 1.0f;
         float satHighlight = 1.0f;
+        bool orangeMask = false;
     };
 
     // ── Complete preset ────────────────────────────────────────────────────────────
