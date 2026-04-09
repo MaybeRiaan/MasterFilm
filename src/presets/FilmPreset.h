@@ -22,7 +22,7 @@ namespace MasterFilm {
     // CST nodes: Rec709 → ACEScct (input), ACEScct → Rec709 (output).
     enum class ColorSpaceMode {
         ACEScct = 0,      // ACEScct / AP1 — log, middle grey at 0.4135
-        DaVinciWideGamut  // DaVinci Wide Gamut / DaVinci Intermediate — middle grey at 0.5
+        DaVinciWideGamut  // DaVinci Wide Gamut / DaVinci Intermediate — middle grey at ~0.336
     };
 
     // ── Grain ─────────────────────────────────────────────────────────────────────

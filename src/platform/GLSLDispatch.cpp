@@ -173,7 +173,8 @@ void main() {
 
     bool GLSLDispatch::renderPass(ShaderProgram& prog,
         GLuint srcTex, GLuint dstFBO,
-        int width, int height)
+        int width, int height,
+        GLuint srcTex2, const char* tex2Name)
     {
         if (!prog.isValid()) return false;
 
@@ -185,6 +186,13 @@ void main() {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, srcTex);
         glUniform1i(prog.loc("uSrc"), 0);
+
+        if (srcTex2 != 0 && tex2Name != nullptr) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, srcTex2);
+            glUniform1i(prog.loc(tex2Name), 1);
+            glActiveTexture(GL_TEXTURE0);   // restore before draw
+        }
 
         glBindVertexArray(mQuadVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);

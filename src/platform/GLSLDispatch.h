@@ -40,10 +40,12 @@ namespace MasterFilm {
         // Called once during kOfxActionCreateInstance.
         bool initShaders(const std::string& resourceDir);
 
-        // Per-render helpers — bind source texture, draw fullscreen quad, read result
+        // Per-render helpers — bind source texture, draw fullscreen quad, read result.
+        // Optional srcTex2/tex2Name binds a second texture to GL_TEXTURE1 (for dual-input passes).
         bool renderPass(ShaderProgram& prog,
             GLuint srcTex, GLuint dstFBO,
-            int width, int height);
+            int width, int height,
+            GLuint srcTex2 = 0, const char* tex2Name = nullptr);
 
         // Shader program accessors
         ShaderProgram& toneColorShader() { return mToneColor; }
