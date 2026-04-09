@@ -1,5 +1,6 @@
 // src/processors/ColorProcessor.cpp
 #include "ColorProcessor.h"
+#include <array>
 #include <cmath>
 #include <algorithm>
 
@@ -120,6 +121,60 @@ void ColorProcessor::applyZoneColor(float& r, float& g, float& b, float luma) co
     hslToRgb(h, s, l, r, g, b);
 }
 
+// ── Orange mask: sigmoid curve (duplicates ToneProcessor math) ────────────────
+
+float ColorProcessor::sigmoidCurve(float stops, const ChannelCurve& c)
+{
+    float k = 4.0f * c.gamma / (c.dMax - c.dMin);
+    return c.dMax - (c.dMax - c.dMin) / (1.0f + std::exp(-k * (stops - c.x0)));
+}
+
+// ── Orange mask: density → output code (duplicates ToneProcessor exit ramp) ───
+
+float ColorProcessor::densityToCode(float density, float dMid, float printGamma, ColorSpaceMode mode)
+{
+    constexpr float kLog2of10 = 3.321928f;
+    float densityDelta = density - dMid;
+    float stopsOut = -densityDelta * kLog2of10 * printGamma;
+    float linOut = 0.18f * std::pow(2.0f, stopsOut);
+    return CST::fromLinear(std::max(linOut, 1e-10f), mode);
+}
+
+// ── Orange mask LUT builder ───────────────────────────────────────────────────
+
+void ColorProcessor::buildOrangeMaskLUT(const ToneParams& tone, float printGamma, ColorSpaceMode mode)
+{
+    // Pre-compute dMid for each channel (density at stops=0)
+    float dMidR = sigmoidCurve(0.0f, tone.red);
+    float dMidG = sigmoidCurve(0.0f, tone.green);
+    float dMidB = sigmoidCurve(0.0f, tone.blue);
+
+    for (int i = 0; i < 64; ++i) {
+        float encoded = mMaskLUTMin + (static_cast<float>(i) / 63.0f) * (mMaskLUTMax - mMaskLUTMin);
+
+        float linear = CST::toLinear(encoded, mode);
+        if (linear < 1e-10f) linear = 1e-10f;
+
+        float stops = std::log2(linear / 0.18f);
+
+        // Per-channel density and output code
+        float densityR = sigmoidCurve(stops, tone.red);
+        float densityG = sigmoidCurve(stops, tone.green);
+        float densityB = sigmoidCurve(stops, tone.blue);
+
+        float codeR = densityToCode(densityR, dMidR, printGamma, mode);
+        float codeG = densityToCode(densityG, dMidG, printGamma, mode);
+        float codeB = densityToCode(densityB, dMidB, printGamma, mode);
+
+        // Correction gains: bring R and B toward G
+        float gainR = (codeR > 1e-10f) ? codeG / codeR : 1.0f;
+        float gainG = 1.0f;
+        float gainB = (codeB > 1e-10f) ? codeG / codeB : 1.0f;
+
+        mMaskLUT[i] = { gainR, gainG, gainB };
+    }
+}
+
 // ── GPU dispatch ──────────────────────────────────────────────────────────────
 
 OfxStatus ColorProcessor::processGPU(OfxImageEffectHandle,
@@ -145,6 +200,21 @@ OfxStatus ColorProcessor::processCPU(const float* src, float* dst,
             float g = src[idx + 1];
             float b = src[idx + 2];
             float a = (nComponents == 4) ? src[idx + 3] : 1.0f;
+
+            // 0. Orange mask compensation (applied before coupling)
+            if (mParams.orangeMask) {
+                float luma_enc = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                float t = (luma_enc - mMaskLUTMin) / (mMaskLUTMax - mMaskLUTMin);
+                t = std::clamp(t, 0.0f, 1.0f);
+                float fi = t * 63.0f;
+                int lo = static_cast<int>(fi);
+                int hi = std::min(lo + 1, 63);
+                float frac = fi - static_cast<float>(lo);
+                float gR = mMaskLUT[lo][0] + frac * (mMaskLUT[hi][0] - mMaskLUT[lo][0]);
+                float gG = mMaskLUT[lo][1] + frac * (mMaskLUT[hi][1] - mMaskLUT[lo][1]);
+                float gB = mMaskLUT[lo][2] + frac * (mMaskLUT[hi][2] - mMaskLUT[lo][2]);
+                r *= gR; g *= gG; b *= gB;
+            }
 
             // 1. Inter-layer coupling
             applyCoupling(r, g, b);

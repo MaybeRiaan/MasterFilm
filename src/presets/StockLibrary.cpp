@@ -134,6 +134,7 @@ namespace MasterFilm {
             p.color.satShadow = 0.90f;
             p.color.satMid = 1.00f;
             p.color.satHighlight = 0.95f;
+            p.color.orangeMask = false;
 
             mPresets.push_back(p);
         }

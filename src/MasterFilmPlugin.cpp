@@ -8,11 +8,16 @@
 #include "ofxPixels.h"
 
 #include "processors/ToneProcessor.h"
+#include "processors/ColorProcessor.h"
+#include "processors/HalationProcessor.h"
+#include "processors/GrainProcessor.h"
+#include "processors/AcutanceProcessor.h"
 #include "presets/StockLibrary.h"
 #include "presets/FilmPreset.h"
 
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 static OfxStatus pluginMain(const char* action,
@@ -250,7 +255,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // ── Build tone processor ──────────────────────────────────────────────────
+    // ── Preset ────────────────────────────────────────────────────────────────
     const MasterFilm::FilmPreset* preset =
         MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
 
@@ -260,26 +265,71 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    MasterFilm::ToneProcessor toneProc(preset->tone);
+    // ── Full-frame dimensions ─────────────────────────────────────────────────
+    static constexpr int kNComp = 4;
+    static constexpr int kBytesPerPixel = kNComp * sizeof(float);
 
-    // ── Process row by row ────────────────────────────────────────────────────
-    static constexpr int kNComponents = 4;
-    static constexpr int kBytesPerPixel = kNComponents * sizeof(float);
-    const int rowWidth = renderWindow.x2 - renderWindow.x1;
+    const int width  = renderWindow.x2 - renderWindow.x1;
+    const int height = renderWindow.y2 - renderWindow.y1;
+    const int nPixels = width * height;
 
-    for (int y = renderWindow.y1; y < renderWindow.y2; ++y)
+    // ── Ping-pong buffers (full frame, contiguous) ────────────────────────────
+    std::vector<float> bufA(static_cast<size_t>(nPixels * kNComp));
+    std::vector<float> bufB(static_cast<size_t>(nPixels * kNComp));
+
+    // ── Copy source image into bufA (destriding) ──────────────────────────────
+    for (int y = 0; y < height; ++y)
     {
         const float* srcRow = reinterpret_cast<const float*>(
             static_cast<const char*>(srcPtr)
-            + static_cast<ptrdiff_t>(y - srcBounds.y1) * srcRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.y1 + y - srcBounds.y1) * srcRowBytes
             + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
 
+        std::memcpy(&bufA[static_cast<size_t>(y * width * kNComp)],
+                    srcRow,
+                    static_cast<size_t>(width * kBytesPerPixel));
+    }
+
+    // ── Build processors ──────────────────────────────────────────────────────
+    MasterFilm::ToneProcessor toneProc(preset->tone);
+
+    MasterFilm::ColorProcessor colorProc(preset->color);
+    colorProc.buildOrangeMaskLUT(preset->tone, preset->tone.printGamma, colorSpaceMode);
+
+    MasterFilm::HalationProcessor halationProc(preset->halation);
+
+    const int renderSeed = static_cast<int>(renderTime * 24.0);
+    MasterFilm::GrainProcessor grainProc(preset->grain);
+
+    MasterFilm::AcutanceProcessor acutanceProc(preset->acutance);
+
+    // ── Render pipeline: Tone → Color → Halation → Grain → Acutance ──────────
+    // bufA → Tone → bufB
+    toneProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
+
+    // bufB → Color → bufA
+    colorProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp);
+
+    // bufA → Halation → bufB
+    halationProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+
+    // bufB → Grain → bufA
+    grainProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp, renderSeed);
+
+    // bufA → Acutance → bufB
+    acutanceProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+
+    // ── Copy bufB (final result) to destination image (re-striding) ───────────
+    for (int y = 0; y < height; ++y)
+    {
         float* dstRow = reinterpret_cast<float*>(
             static_cast<char*>(dstPtr)
-            + static_cast<ptrdiff_t>(y - dstBounds.y1) * dstRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.y1 + y - dstBounds.y1) * dstRowBytes
             + static_cast<ptrdiff_t>(renderWindow.x1 - dstBounds.x1) * kBytesPerPixel);
 
-        toneProc.processCPU(srcRow, dstRow, rowWidth, 1, kNComponents, colorSpaceMode);
+        std::memcpy(dstRow,
+                    &bufB[static_cast<size_t>(y * width * kNComp)],
+                    static_cast<size_t>(width * kBytesPerPixel));
     }
 
     // ── Release ───────────────────────────────────────────────────────────────

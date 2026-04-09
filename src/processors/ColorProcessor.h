@@ -3,7 +3,9 @@
 // Runs in the same pass as ToneProcessor (combined shader) for efficiency.
 #pragma once
 #include "../presets/FilmPreset.h"
+#include "ColorSpaceTransform.h"
 #include "ofxImageEffect.h"
+#include <array>
 
 namespace MasterFilm {
 
@@ -21,8 +23,15 @@ public:
     void setParams(const ColorParams& p) { mParams = p; }
     const ColorParams& params() const    { return mParams; }
 
+    void buildOrangeMaskLUT(const ToneParams& tone, float printGamma, ColorSpaceMode mode);
+
 private:
     ColorParams mParams;
+
+    // Orange mask LUT: 64 entries, each { gain_R, gain_G, gain_B }
+    std::array<std::array<float, 3>, 64> mMaskLUT = {};
+    float mMaskLUTMin = 0.05f;
+    float mMaskLUTMax = 0.85f;
 
     // Apply the 3×3 coupling matrix to an RGB triplet
     void applyCoupling(float& r, float& g, float& b) const;
@@ -41,6 +50,10 @@ private:
     static float shadowBlend(float luma);
     static float midBlend(float luma);
     static float highlightBlend(float luma);
+
+    // Orange mask helpers — duplicate ToneProcessor sigmoid math (no ToneProcessor.h include)
+    static float sigmoidCurve(float stops, const ChannelCurve& c);
+    static float densityToCode(float density, float dMid, float printGamma, ColorSpaceMode mode);
 };
 
 } // namespace MasterFilm
