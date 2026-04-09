@@ -71,7 +71,15 @@ static void createFloatTexAndFBO(int w, int h, GLuint& tex, GLuint& fbo)
 #endif // MASTERFILM_ENABLE_OPENGL
 
 // ── Parameter name constants ──────────────────────────────────────────────────
-static constexpr const char* kParamColorSpace = "colorSpace";
+static constexpr const char* kParamColorSpace     = "colorSpace";
+
+// Per-pass enable checkboxes — toggled at runtime for debugging / verification.
+static constexpr const char* kParamEnableTone     = "enableTone";
+static constexpr const char* kParamEnableColor    = "enableColor";
+static constexpr const char* kParamEnableHalation = "enableHalation";
+static constexpr const char* kParamEnableGrain    = "enableGrain";
+static constexpr const char* kParamEnableAcutance = "enableAcutance";
+static constexpr const char* kParamEnableGPU      = "enableGPU";
 
 // Choice indices — must match option order in onDescribeInContext
 // and correspond to ColorSpaceMode enum values in FilmPreset.h.
@@ -205,6 +213,27 @@ static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceACEScct, "ACEScct");
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceDWG, "DaVinci Wide Gamut");
 
+    // ── Per-pass enable checkboxes (for debugging / isolating passes) ─────────
+    // All default ON so the plugin behaves identically to the original out of the box.
+    struct BoolDef { const char* name; const char* label; const char* hint; };
+    static const BoolDef kBoolParams[] = {
+        { kParamEnableTone,     "Tone",      "Enable tone curve (H&D characteristic). CPU pass." },
+        { kParamEnableColor,    "Color",     "Enable color coupling and zone hue/sat. CPU pass." },
+        { kParamEnableHalation, "Halation",  "Enable lens halation. GPU passes 1–2 (or CPU)." },
+        { kParamEnableGrain,    "Grain",     "Enable film grain. GPU pass 3 (or CPU)." },
+        { kParamEnableAcutance, "Acutance",  "Enable acutance / edge emphasis. GPU pass 4 (or CPU)." },
+        { kParamEnableGPU,      "Use GPU",   "Use OpenGL GPU path when the host provides a GL context. "
+                                             "Uncheck to force CPU rendering for side-by-side comparison." },
+    };
+    for (const auto& bd : kBoolParams) {
+        OfxPropertySetHandle boolProps;
+        gParamSuite->paramDefine(paramSet, kOfxParamTypeBoolean, bd.name, &boolProps);
+        gPropSuite->propSetString(boolProps, kOfxPropLabel,         0, bd.label);
+        gPropSuite->propSetString(boolProps, kOfxParamPropHint,     0, bd.hint);
+        gPropSuite->propSetInt(boolProps,    kOfxParamPropDefault,  0, 1);   // ON by default
+        gPropSuite->propSetInt(boolProps,    kOfxParamPropAnimates, 0, 0);
+    }
+
     return kOfxStatOK;
 }
 
@@ -242,6 +271,22 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     case kColorSpaceDWG:     colorSpaceMode = MasterFilm::ColorSpaceMode::DaVinciWideGamut; break;
     default:                 colorSpaceMode = MasterFilm::ColorSpaceMode::ACEScct;          break;
     }
+
+    // ── Read per-pass enable checkboxes ───────────────────────────────────────
+    // Helper: returns true (enabled) if the param is missing (safe default).
+    auto readBool = [&](const char* name) -> bool {
+        OfxParamHandle h = nullptr;
+        gParamSuite->paramGetHandle(paramSet, name, &h, nullptr);
+        int v = 1;
+        if (h) gParamSuite->paramGetValue(h, &v);
+        return v != 0;
+    };
+    const bool enableTone     = readBool(kParamEnableTone);
+    const bool enableColor    = readBool(kParamEnableColor);
+    const bool enableHalation = readBool(kParamEnableHalation);
+    const bool enableGrain    = readBool(kParamEnableGrain);
+    const bool enableAcutance = readBool(kParamEnableAcutance);
+    const bool enableGPU      = readBool(kParamEnableGPU);
 
     // ── Get render window ─────────────────────────────────────────────────────
     OfxRectI renderWindow;
@@ -301,7 +346,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
             if (it != gGLDispatchers.end()) gl = it->second;
         }
 
-        if (gl) {
+        if (gl && enableGPU) {
             // Declare all GL resource handles before the try so the catch can clean them up.
             OfxPropertySetHandle gpuSrcImg = nullptr;
             GLuint cpuTex = 0, texA = 0, texB = 0, fboA = 0, fboB = 0;
@@ -334,10 +379,19 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                                 static_cast<size_t>(width * kBytesPerPixel));
                 }
 
-                // CPU: Tone → Color  (bufA_cpu → bufB_cpu → bufA_cpu)
-                toneProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
-                colorProc.processCPU(bufB_cpu.data(), bufA_cpu.data(), width, height, kNComp);
-                // bufA_cpu now holds the Tone+Color result.
+                // CPU pre-passes: Tone and Color — honour enable checkboxes.
+                // When disabled, memcpy preserves the ping-pong invariant.
+                const size_t bufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
+                if (enableTone)
+                    toneProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
+                else
+                    std::memcpy(bufB_cpu.data(), bufA_cpu.data(), bufBytes);
+
+                if (enableColor)
+                    colorProc.processCPU(bufB_cpu.data(), bufA_cpu.data(), width, height, kNComp);
+                else
+                    std::memcpy(bufA_cpu.data(), bufB_cpu.data(), bufBytes);
+                // bufA_cpu now holds the Tone+Color result (or passthrough).
 
                 // Query host output FBO before any renderPass() call (renderPass rebinds to 0).
                 GLint hostFBO = 0;
@@ -377,6 +431,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                 //   uSrc  = cpuTex (original pre-halation image)
                 //   uHBlur = texA  (horizontal-blur output from Pass 1)
                 //   result → fboB; composite in texB
+                //   uIntensity = 0 when halation is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->halationVShader();
                     const float innerRadius = preset->halation.radius * static_cast<float>(height) * 0.03f;
@@ -387,12 +442,14 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     glUniform1f(prog.loc("uThreshold"),        preset->halation.threshold);   // declared but unused in shader, safe
                     glUniform3f(prog.loc("uSpecBias"),                                         // declared but unused in shader, safe
                                 preset->halation.biasR, preset->halation.biasG, preset->halation.biasB);
-                    glUniform1f(prog.loc("uIntensity"),        preset->halation.intensity);
+                    glUniform1f(prog.loc("uIntensity"),
+                                enableHalation ? preset->halation.intensity : 0.0f);
                     glUseProgram(0);
                     gl->renderPass(prog, cpuTex, fboB, width, height, texA, "uHBlur");
                 }
 
                 // Pass 3 — Grain  (texB → fboA; result overwrites texA)
+                //   uAmount = 0 when grain is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->grainShader();
                     // Inline GrainProcessor::sizeToSigma (it is private): k * sqrt(iso/100) * (0.3 + size*2.7)
@@ -400,7 +457,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     const float sigma = k * std::sqrt(preset->grain.iso / 100.0f)
                                           * (0.3f + preset->grain.size * 2.7f);
                     glUseProgram(prog.id);
-                    glUniform1f(prog.loc("uAmount"),    preset->grain.amount);
+                    glUniform1f(prog.loc("uAmount"),    enableGrain ? preset->grain.amount : 0.0f);
                     glUniform1f(prog.loc("uSigma"),     sigma);
                     glUniform1f(prog.loc("uRoughness"), preset->grain.roughness);
                     glUniform3f(prog.loc("uZoneWeights"),
@@ -411,11 +468,13 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                 }
 
                 // Pass 4 — Acutance  (texA → host output FBO)
+                //   uIntensity = 0 when acutance is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->acutanceShader();
                     glUseProgram(prog.id);
                     glUniform1i(prog.loc("uCharacter"),        static_cast<int>(preset->acutance.character));
-                    glUniform1f(prog.loc("uIntensity"),         preset->acutance.intensity);
+                    glUniform1f(prog.loc("uIntensity"),
+                                enableAcutance ? preset->acutance.intensity : 0.0f);
                     glUniform1f(prog.loc("uRolloff"),           preset->acutance.rolloff);
                     glUniform1f(prog.loc("uKostinskyStrength"), preset->acutance.kostinskyStrength);
                     glUseProgram(0);
@@ -531,20 +590,40 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     }
 
     // ── Render pipeline: Tone → Color → Halation → Grain → Acutance ──────────
+    // Each stage reads from one buffer and writes to the other (ping-pong).
+    // When a stage is disabled, memcpy preserves the alternating invariant so
+    // the final result always lands in bufB regardless of which stages ran.
+    const size_t cpuBufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
+
     // bufA → Tone → bufB
-    toneProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
+    if (enableTone)
+        toneProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
 
     // bufB → Color → bufA
-    colorProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp);
+    if (enableColor)
+        colorProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp);
+    else
+        std::memcpy(bufA.data(), bufB.data(), cpuBufBytes);
 
     // bufA → Halation → bufB
-    halationProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    if (enableHalation)
+        halationProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
 
     // bufB → Grain → bufA
-    grainProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp, renderSeed);
+    if (enableGrain)
+        grainProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp, renderSeed);
+    else
+        std::memcpy(bufA.data(), bufB.data(), cpuBufBytes);
 
     // bufA → Acutance → bufB
-    acutanceProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    if (enableAcutance)
+        acutanceProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
 
     // ── Copy bufB (final result) to destination image (re-striding) ───────────
     for (int y = 0; y < height; ++y)
