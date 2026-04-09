@@ -19,6 +19,14 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef MASTERFILM_ENABLE_OPENGL
+#include "ofxGPURender.h"
+#include "platform/GLSLDispatch.h"
+#include <cmath>
+#include <map>
+#include <mutex>
+#endif
+
 // ── Forward declarations ──────────────────────────────────────────────────────
 static OfxStatus pluginMain(const char* action,
     const void* handle,
@@ -38,6 +46,29 @@ OfxParameterSuiteV1* gParamSuite = nullptr;
 OfxMemorySuiteV1* gMemorySuite = nullptr;
 OfxMultiThreadSuiteV1* gThreadSuite = nullptr;
 OfxMessageSuiteV2* gMessageSuite = nullptr;
+
+#ifdef MASTERFILM_ENABLE_OPENGL
+static OfxImageEffectOpenGLRenderSuiteV1* gGLSuite = nullptr;
+static std::map<OfxImageEffectHandle, MasterFilm::GLSLDispatch*> gGLDispatchers;
+static std::mutex gGLDispatchersMutex;
+static std::string gBundlePath;
+
+static void createFloatTexAndFBO(int w, int h, GLuint& tex, GLuint& fbo)
+{
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+#endif // MASTERFILM_ENABLE_OPENGL
 
 // ── Parameter name constants ──────────────────────────────────────────────────
 static constexpr const char* kParamColorSpace = "colorSpace";
@@ -101,6 +132,11 @@ static OfxStatus fetchSuites()
     gThreadSuite = reinterpret_cast<OfxMultiThreadSuiteV1*>(
         const_cast<void*>(gHost->fetchSuite(gHost->host, kOfxMultiThreadSuite, 1)));
 
+#ifdef MASTERFILM_ENABLE_OPENGL
+    gGLSuite = reinterpret_cast<OfxImageEffectOpenGLRenderSuiteV1*>(
+        const_cast<void*>(gHost->fetchSuite(gHost->host, kOfxOpenGLRenderSuite, 1)));
+#endif
+
     if (!gPropSuite || !gEffectSuite || !gParamSuite)
         return kOfxStatErrMissingHostFeature;
 
@@ -129,6 +165,14 @@ static OfxStatus onDescribe(OfxImageEffectHandle descriptor)
     gPropSuite->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "Film");
     gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
     gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
+
+#ifdef MASTERFILM_ENABLE_OPENGL
+    gPropSuite->propSetString(effectProps, kOfxImageEffectPropOpenGLRenderSupported, 0, "true");
+    // Capture the bundle root path (e.g. ".../MasterFilm.ofx.bundle") for shader loading.
+    const char* filePath = nullptr;
+    gPropSuite->propGetString(effectProps, kOfxPluginPropFilePath, 0, &filePath);
+    if (filePath && filePath[0] != '\0') gBundlePath = filePath;
+#endif
 
     return kOfxStatOK;
 }
@@ -217,6 +261,220 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     double renderTime = 0.0;
     gPropSuite->propGetDouble(inArgs, kOfxPropTime, 0, &renderTime);
 
+    // ── Preset ────────────────────────────────────────────────────────────────
+    const MasterFilm::FilmPreset* preset =
+        MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
+    if (!preset) return kOfxStatFailed;
+
+    // ── Full-frame dimensions ─────────────────────────────────────────────────
+    static constexpr int kNComp = 4;
+    static constexpr int kBytesPerPixel = kNComp * sizeof(float);
+
+    const int width   = renderWindow.x2 - renderWindow.x1;
+    const int height  = renderWindow.y2 - renderWindow.y1;
+    const int nPixels = width * height;
+
+    // ── Build processors (shared by GPU and CPU paths) ────────────────────────
+    MasterFilm::ToneProcessor toneProc(preset->tone);
+
+    MasterFilm::ColorProcessor colorProc(preset->color);
+    colorProc.buildOrangeMaskLUT(preset->tone, preset->tone.printGamma, colorSpaceMode);
+
+    MasterFilm::HalationProcessor halationProc(preset->halation);
+
+    const int renderSeed = static_cast<int>(renderTime * 24.0);
+    MasterFilm::GrainProcessor grainProc(preset->grain);
+
+    MasterFilm::AcutanceProcessor acutanceProc(preset->acutance);
+
+    // ── GPU path ──────────────────────────────────────────────────────────────
+#ifdef MASTERFILM_ENABLE_OPENGL
+    {
+        int glEnabled = 0;
+        if (gGLSuite)
+            gPropSuite->propGetInt(inArgs, kOfxImageEffectPropOpenGLEnabled, 0, &glEnabled);
+
+        MasterFilm::GLSLDispatch* gl = nullptr;
+        if (glEnabled) {
+            std::lock_guard<std::mutex> lk(gGLDispatchersMutex);
+            auto it = gGLDispatchers.find(instance);
+            if (it != gGLDispatchers.end()) gl = it->second;
+        }
+
+        if (gl) {
+            // Declare all GL resource handles before the try so the catch can clean them up.
+            OfxPropertySetHandle gpuSrcImg = nullptr;
+            GLuint cpuTex = 0, texA = 0, texB = 0, fboA = 0, fboB = 0;
+
+            try {
+                // Fetch source pixels for CPU Tone+Color pre-pass.
+                gEffectSuite->clipGetImage(srcClip, renderTime, nullptr, &gpuSrcImg);
+                if (!gpuSrcImg) throw std::runtime_error("GPU: clipGetImage(src) failed");
+
+                void* srcPtr = nullptr;
+                gPropSuite->propGetPointer(gpuSrcImg, kOfxImagePropData, 0, &srcPtr);
+                int srcRowBytes = 0;
+                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropRowBytes, 0, &srcRowBytes);
+                OfxRectI srcBounds{};
+                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 0, &srcBounds.x1);
+                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 1, &srcBounds.y1);
+                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 2, &srcBounds.x2);
+                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 3, &srcBounds.y2);
+                if (!srcPtr) throw std::runtime_error("GPU: null srcPtr");
+
+                // Destride source into bufA.
+                std::vector<float> bufA_cpu(static_cast<size_t>(nPixels * kNComp));
+                std::vector<float> bufB_cpu(static_cast<size_t>(nPixels * kNComp));
+                for (int y = 0; y < height; ++y) {
+                    const float* srcRow = reinterpret_cast<const float*>(
+                        static_cast<const char*>(srcPtr)
+                        + static_cast<ptrdiff_t>(renderWindow.y1 + y - srcBounds.y1) * srcRowBytes
+                        + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
+                    std::memcpy(&bufA_cpu[static_cast<size_t>(y * width * kNComp)], srcRow,
+                                static_cast<size_t>(width * kBytesPerPixel));
+                }
+
+                // CPU: Tone → Color  (bufA_cpu → bufB_cpu → bufA_cpu)
+                toneProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
+                colorProc.processCPU(bufB_cpu.data(), bufA_cpu.data(), width, height, kNComp);
+                // bufA_cpu now holds the Tone+Color result.
+
+                // Query host output FBO before any renderPass() call (renderPass rebinds to 0).
+                GLint hostFBO = 0;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &hostFBO);
+
+                // Upload CPU result to a GL texture.
+                glGenTextures(1, &cpuTex);
+                glBindTexture(GL_TEXTURE_2D, cpuTex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0,
+                             GL_RGBA, GL_FLOAT, bufA_cpu.data());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glBindTexture(GL_TEXTURE_2D, 0);
+
+                // Create two intermediate ping-pong texture/FBO pairs.
+                createFloatTexAndFBO(width, height, texA, fboA);
+                createFloatTexAndFBO(width, height, texB, fboB);
+
+                // Pass 1 — Halation Horizontal  (cpuTex → fboA; result in texA)
+                {
+                    MasterFilm::ShaderProgram& prog = gl->halationHShader();
+                    const float innerRadius = preset->halation.radius * static_cast<float>(height) * 0.03f;
+                    glUseProgram(prog.id);
+                    glUniform1f(prog.loc("uInnerRadius"),      innerRadius);
+                    glUniform1f(prog.loc("uOuterRadiusScale"), preset->halation.outerRadiusScale);
+                    glUniform1f(prog.loc("uOuterWeight"),      preset->halation.outerWeight);
+                    glUniform1f(prog.loc("uThreshold"),        preset->halation.threshold);
+                    glUniform3f(prog.loc("uSpecBias"),
+                                preset->halation.biasR, preset->halation.biasG, preset->halation.biasB);
+                    glUseProgram(0);
+                    gl->renderPass(prog, cpuTex, fboA, width, height);
+                }
+
+                // Pass 2 — Halation Vertical + Composite
+                //   uSrc  = cpuTex (original pre-halation image)
+                //   uHBlur = texA  (horizontal-blur output from Pass 1)
+                //   result → fboB; composite in texB
+                {
+                    MasterFilm::ShaderProgram& prog = gl->halationVShader();
+                    const float innerRadius = preset->halation.radius * static_cast<float>(height) * 0.03f;
+                    glUseProgram(prog.id);
+                    glUniform1f(prog.loc("uInnerRadius"),      innerRadius);
+                    glUniform1f(prog.loc("uOuterRadiusScale"), preset->halation.outerRadiusScale);
+                    glUniform1f(prog.loc("uOuterWeight"),      preset->halation.outerWeight);
+                    glUniform1f(prog.loc("uThreshold"),        preset->halation.threshold);   // declared but unused in shader, safe
+                    glUniform3f(prog.loc("uSpecBias"),                                         // declared but unused in shader, safe
+                                preset->halation.biasR, preset->halation.biasG, preset->halation.biasB);
+                    glUniform1f(prog.loc("uIntensity"),        preset->halation.intensity);
+                    glUseProgram(0);
+                    gl->renderPass(prog, cpuTex, fboB, width, height, texA, "uHBlur");
+                }
+
+                // Pass 3 — Grain  (texB → fboA; result overwrites texA)
+                {
+                    MasterFilm::ShaderProgram& prog = gl->grainShader();
+                    // Inline GrainProcessor::sizeToSigma (it is private): k * sqrt(iso/100) * (0.3 + size*2.7)
+                    const float k = 0.35f;
+                    const float sigma = k * std::sqrt(preset->grain.iso / 100.0f)
+                                          * (0.3f + preset->grain.size * 2.7f);
+                    glUseProgram(prog.id);
+                    glUniform1f(prog.loc("uAmount"),    preset->grain.amount);
+                    glUniform1f(prog.loc("uSigma"),     sigma);
+                    glUniform1f(prog.loc("uRoughness"), preset->grain.roughness);
+                    glUniform3f(prog.loc("uZoneWeights"),
+                                preset->grain.shadowWeight, preset->grain.midWeight, preset->grain.highlightWeight);
+                    glUniform1i(prog.loc("uSeed"),      renderSeed);
+                    glUseProgram(0);
+                    gl->renderPass(prog, texB, fboA, width, height);   // result now in texA
+                }
+
+                // Pass 4 — Acutance  (texA → host output FBO)
+                {
+                    MasterFilm::ShaderProgram& prog = gl->acutanceShader();
+                    glUseProgram(prog.id);
+                    glUniform1i(prog.loc("uCharacter"),        static_cast<int>(preset->acutance.character));
+                    glUniform1f(prog.loc("uIntensity"),         preset->acutance.intensity);
+                    glUniform1f(prog.loc("uRolloff"),           preset->acutance.rolloff);
+                    glUniform1f(prog.loc("uKostinskyStrength"), preset->acutance.kostinskyStrength);
+                    glUseProgram(0);
+                    gl->renderPass(prog, texA, static_cast<GLuint>(hostFBO), width, height);
+                }
+
+                // Cleanup GL resources and source image.
+                glDeleteTextures(1, &cpuTex);  cpuTex = 0;
+                glDeleteTextures(1, &texA);    texA   = 0;
+                glDeleteTextures(1, &texB);    texB   = 0;
+                glDeleteFramebuffers(1, &fboA); fboA  = 0;
+                glDeleteFramebuffers(1, &fboB); fboB  = 0;
+                gEffectSuite->clipReleaseImage(gpuSrcImg); gpuSrcImg = nullptr;
+
+                return kOfxStatOK;
+            }
+            catch (...) {
+                // Clean up any GL resources that were created before the exception.
+                if (cpuTex) glDeleteTextures(1, &cpuTex);
+                if (texA)   glDeleteTextures(1, &texA);
+                if (texB)   glDeleteTextures(1, &texB);
+                if (fboA)   glDeleteFramebuffers(1, &fboA);
+                if (fboB)   glDeleteFramebuffers(1, &fboB);
+                if (gpuSrcImg) gEffectSuite->clipReleaseImage(gpuSrcImg);
+
+                // Black-fill the destination so GPU failures are visually obvious during testing.
+                // Correct output = GPU path worked.  Black frame = GPU path failed (check stderr).
+                OfxPropertySetHandle dstImgBlack = nullptr;
+                gEffectSuite->clipGetImage(dstClip, renderTime, nullptr, &dstImgBlack);
+                if (dstImgBlack) {
+                    void* dstPtrBlack = nullptr;
+                    gPropSuite->propGetPointer(dstImgBlack, kOfxImagePropData, 0, &dstPtrBlack);
+                    int dstRowBytesBlack = 0;
+                    gPropSuite->propGetInt(dstImgBlack, kOfxImagePropRowBytes, 0, &dstRowBytesBlack);
+                    OfxRectI dstBoundsBlack{};
+                    gPropSuite->propGetInt(dstImgBlack, kOfxImagePropBounds, 0, &dstBoundsBlack.x1);
+                    gPropSuite->propGetInt(dstImgBlack, kOfxImagePropBounds, 1, &dstBoundsBlack.y1);
+                    gPropSuite->propGetInt(dstImgBlack, kOfxImagePropBounds, 2, &dstBoundsBlack.x2);
+                    gPropSuite->propGetInt(dstImgBlack, kOfxImagePropBounds, 3, &dstBoundsBlack.y2);
+                    if (dstPtrBlack) {
+                        for (int y = 0; y < height; ++y) {
+                            float* row = reinterpret_cast<float*>(
+                                static_cast<char*>(dstPtrBlack)
+                                + static_cast<ptrdiff_t>(renderWindow.y1 + y - dstBoundsBlack.y1) * dstRowBytesBlack
+                                + static_cast<ptrdiff_t>(renderWindow.x1 - dstBoundsBlack.x1) * kBytesPerPixel);
+                            std::memset(row, 0, static_cast<size_t>(width * kBytesPerPixel));
+                        }
+                    }
+                    gEffectSuite->clipReleaseImage(dstImgBlack);
+                }
+                return kOfxStatOK;  // host sees "success"; black frame signals the failure visually
+            }
+        }
+    }
+#endif // MASTERFILM_ENABLE_OPENGL
+
+    // ── CPU path (full pipeline) ──────────────────────────────────────────────
+    // Runs when OpenGL is unavailable or not enabled by the host.
+
     // ── Fetch image buffers ───────────────────────────────────────────────────
     OfxPropertySetHandle srcImg = nullptr;
     OfxPropertySetHandle dstImg = nullptr;
@@ -255,24 +513,6 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         return kOfxStatFailed;
     }
 
-    // ── Preset ────────────────────────────────────────────────────────────────
-    const MasterFilm::FilmPreset* preset =
-        MasterFilm::StockLibrary::instance().findById("kodak_vision3_500t");
-
-    if (!preset) {
-        gEffectSuite->clipReleaseImage(srcImg);
-        gEffectSuite->clipReleaseImage(dstImg);
-        return kOfxStatFailed;
-    }
-
-    // ── Full-frame dimensions ─────────────────────────────────────────────────
-    static constexpr int kNComp = 4;
-    static constexpr int kBytesPerPixel = kNComp * sizeof(float);
-
-    const int width  = renderWindow.x2 - renderWindow.x1;
-    const int height = renderWindow.y2 - renderWindow.y1;
-    const int nPixels = width * height;
-
     // ── Ping-pong buffers (full frame, contiguous) ────────────────────────────
     std::vector<float> bufA(static_cast<size_t>(nPixels * kNComp));
     std::vector<float> bufB(static_cast<size_t>(nPixels * kNComp));
@@ -289,19 +529,6 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     srcRow,
                     static_cast<size_t>(width * kBytesPerPixel));
     }
-
-    // ── Build processors ──────────────────────────────────────────────────────
-    MasterFilm::ToneProcessor toneProc(preset->tone);
-
-    MasterFilm::ColorProcessor colorProc(preset->color);
-    colorProc.buildOrangeMaskLUT(preset->tone, preset->tone.printGamma, colorSpaceMode);
-
-    MasterFilm::HalationProcessor halationProc(preset->halation);
-
-    const int renderSeed = static_cast<int>(renderTime * 24.0);
-    MasterFilm::GrainProcessor grainProc(preset->grain);
-
-    MasterFilm::AcutanceProcessor acutanceProc(preset->acutance);
 
     // ── Render pipeline: Tone → Color → Halation → Grain → Acutance ──────────
     // bufA → Tone → bufB
@@ -367,6 +594,31 @@ static OfxStatus pluginMain(const char* action,
         if (std::strcmp(action, kOfxImageEffectActionRender) == 0)
             return onRender(reinterpret_cast<OfxImageEffectHandle>(
                 const_cast<void*>(handle)), inArgs);
+
+#ifdef MASTERFILM_ENABLE_OPENGL
+        if (std::strcmp(action, kOfxActionOpenGLContextAttached) == 0) {
+            auto instance = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
+            auto* gl = new MasterFilm::GLSLDispatch();
+            std::string resourceDir = gBundlePath + "/Contents/Resources";
+            if (!gl->initShaders(resourceDir)) {
+                delete gl;
+                return kOfxStatFailed;
+            }
+            std::lock_guard<std::mutex> lk(gGLDispatchersMutex);
+            gGLDispatchers[instance] = gl;
+            return kOfxStatOK;
+        }
+        if (std::strcmp(action, kOfxActionOpenGLContextDetached) == 0) {
+            auto instance = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
+            std::lock_guard<std::mutex> lk(gGLDispatchersMutex);
+            auto it = gGLDispatchers.find(instance);
+            if (it != gGLDispatchers.end()) {
+                delete it->second;
+                gGLDispatchers.erase(it);
+            }
+            return kOfxStatOK;
+        }
+#endif
 
         return kOfxStatReplyDefault;
     }
