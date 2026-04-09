@@ -67,11 +67,12 @@ namespace MasterFilm {
     //
     // PHYSICAL MODEL
     // ─────────────────────────────────────────────────────────────────────────────
-    // The tone processor models three physical stages:
+    // The tone processor models the photochemical chain:
     //
-    //   1. Exposure:     scene linear → log exposure (log10 based)
-    //   2. H&D curve:    log exposure → density (per-channel characteristic curve)
-    //   3. Scan encode:  density → working space code value (linear rescale)
+    //   1. Exposure:     scene linear → log2 stops relative to middle grey
+    //   2. H&D curve:    stops → density (per-channel sigmoid characteristic curve)
+    //   3. Print gamma:  density delta amplified by print stock contrast
+    //   4. Exit ramp:    amplified density → Beer-Lambert transmission → re-encode
     //
     // Each emulsion layer (R, G, B) is a physically independent coating with
     // its own characteristic curve. The green channel serves as the luminance
@@ -80,31 +81,25 @@ namespace MasterFilm {
     //
     // CHANNEL CURVE PARAMETERS
     // ─────────────────────────────────────────────────────────────────────────────
-    // All input values are in CAMERA STOPS relative to middle grey (0 = 0.18).
-    // This matches the x-axis of published sensitometric curves directly.
-    //
-    //   toeStartStops  — where the curve lifts off base fog
-    //   toeEndStops    — where toe transitions to straight line
-    //   shoulderStops  — where straight line transitions to shoulder
-    //   clipStops      — where the curve reaches Dmax (full saturation)
-    //
-    // Density values are ABSOLUTE STATUS-M densities as published:
+    // Density values are ABSOLUTE STATUS-M densities from published datasheet:
     //   dMin           — base fog + minimum density
     //   dMax           — maximum achievable density
     //
     // Shape:
     //   gamma          — slope of the straight-line region (density per stop)
+    //   x0             — sigmoid inflection point = (toeEnd + shoulder) / 2
     //
-    // SCAN ENCODING
+    // EXIT RAMP
     // ─────────────────────────────────────────────────────────────────────────────
-    // After the H&D curve produces a density value, the scan encoder maps
-    // the density range [dMin, dMax] into working space code values.
-    // This replaces the broken fromLinear() inverse CST — density is not
-    // scene-linear radiance and cannot be converted with a radiometric
-    // transfer function.
+    // The density delta (D - dMid) is converted to output stops via
+    // Beer-Lambert transmission, amplified by printGamma:
+    //   stops_out = -(D - dMid) * log2(10) * printGamma
+    //   lin_out   = 0.18 * 2^stops_out
+    //   code_out  = fromLinear(lin_out)
     //
-    // The scan encode anchors (codeBlack, codeWhite) are set per color space
-    // at runtime — they are properties of the encoding, not the film.
+    // printGamma models the print stock's contrast contribution.
+    // Middle grey is exactly preserved (delta=0). Phase 2 will replace
+    // this linear multiplier with the actual 2383 characteristic curve.
     //
     // FILM COLOR CONTROL
     // ─────────────────────────────────────────────────────────────────────────────
@@ -127,15 +122,15 @@ namespace MasterFilm {
     // an arbitrary 0.3f junction approximation.
     struct ChannelCurve {
         // Density — absolute Status-M values from published datasheet
-        float dMin  =  0.20f;  // base fog density
-        float dMax  =  2.40f;  // maximum density (saturation)
+        float dMin = 0.20f;  // base fog density
+        float dMax = 2.40f;  // maximum density (saturation)
 
         // Shape — straight-line slope from sensitometric chart
-        float gamma =  0.25f;  // density per stop
+        float gamma = 0.25f;  // density per stop
 
         // Sigmoid inflection point in stops relative to middle grey.
         // Set to (toeEndStops + shoulderStops) / 2 from datasheet geometry.
-        float x0    =  1.75f;  // stops — green 500T default
+        float x0 = 1.75f;  // stops — green 500T default
     };
 
     struct ToneParams {
@@ -146,6 +141,22 @@ namespace MasterFilm {
 
         // Film Color — blends R/B toward G (0 = tone only, 1 = full stock colour)
         float filmColor = 1.0f;
+
+        // Print gamma — models the print stock's contrast amplification.
+        // The negative film's density differences are scaled by this value
+        // in the exit ramp: stops_out = -densityDelta * log2(10) * printGamma.
+        //
+        // 1.0 = raw negative density (low contrast, shadows crushed)
+        // 1.8 = default — approximates a scan-graded 2383 projection
+        // 2.5 = high contrast theatrical print
+        //
+        // Middle grey is unaffected (delta=0 at mid). Colour character
+        // comes from per-channel density differences in the negative curve,
+        // which printGamma amplifies uniformly.
+        //
+        // Phase 2 will replace this linear multiplier with the actual 2383
+        // characteristic curve for a proper composable print stage.
+        float printGamma = 1.8f;
     };
 
     // ── Color / inter-layer coupling ──────────────────────────────────────────────

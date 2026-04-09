@@ -94,27 +94,33 @@ namespace MasterFilm {
 
             // Red — lowest Dmax, compresses highlights earliest
             // toeEnd=-3.0, shoulder=+6.0 → x0=1.50
-            p.tone.red.dMin  =  0.15f;
-            p.tone.red.dMax  =  1.80f;
-            p.tone.red.gamma =  0.20f;
-            p.tone.red.x0    =  1.50f;
+            p.tone.red.dMin = 0.15f;
+            p.tone.red.dMax = 1.80f;
+            p.tone.red.gamma = 0.20f;
+            p.tone.red.x0 = 1.50f;
 
             // Green — luminance reference, middle Dmax
             // toeEnd=-3.0, shoulder=+6.5 → x0=1.75
-            p.tone.green.dMin  =  0.25f;
-            p.tone.green.dMax  =  2.30f;
-            p.tone.green.gamma =  0.25f;
-            p.tone.green.x0    =  1.75f;
+            p.tone.green.dMin = 0.25f;
+            p.tone.green.dMax = 2.30f;
+            p.tone.green.gamma = 0.25f;
+            p.tone.green.x0 = 1.75f;
 
             // Blue — highest Dmax, steepest gamma, rolls off earliest
             // toeEnd=-3.0, shoulder=+5.0 → x0=1.00
-            p.tone.blue.dMin  =  0.45f;
-            p.tone.blue.dMax  =  2.85f;
-            p.tone.blue.gamma =  0.30f;
-            p.tone.blue.x0    =  1.00f;
+            p.tone.blue.dMin = 0.45f;
+            p.tone.blue.dMax = 2.85f;
+            p.tone.blue.gamma = 0.30f;
+            p.tone.blue.x0 = 1.00f;
 
             // Film colour at full — user can dial down to 0 for tone-only
-            p.tone.filmColor = 1.0f;
+            p.tone.filmColor = 0.55f;
+
+            // Print gamma — models 2383 print stock contrast amplification.
+            // 1.8 gives shadows at ~0.24 and highlights at ~0.88 ACEScct (green),
+            // filling the usable scope range. Phase 2 will replace this with
+            // the actual 2383 characteristic curve.
+            p.tone.printGamma = 1.8f;
 
             // Inter-layer coupling from published SMPTE density matrix data
             p.color.couplingMatrix = {

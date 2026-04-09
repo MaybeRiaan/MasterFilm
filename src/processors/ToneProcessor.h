@@ -6,42 +6,48 @@
 //   encoded input
 //     → toLinear()                  forward CST (log → scene linear)
 //     → log2(lin / 0.18)            scene linear → stops relative to middle grey
-//     → sigmoid H&D curve           stops → density (per-channel)
+//     → sigmoid H&D curve           stops → density (negative film model)
 //     → filmColor blend             lerp R/B density toward G
-//     → -densityDelta * log2(10)    density → stops out  (Beer-Lambert T = 10^-D)
-//     → fromLinear(0.18 * 2^stops)  stops → scene linear → re-encode (exact CST)
+//     → exit ramp with print gamma  density → stops out → scene linear → re-encode
 //     → encoded output
 //
-// EXIT RAMP — BEER-LAMBERT TRANSMISSION MODEL
+// EXIT RAMP — BEER-LAMBERT + PRINT STOCK GAMMA
 // ─────────────────────────────────────────────────────────────────────────────
-// The positive image density D determines film transmission: T = 10^-D.
+// The negative film density D determines transmission: T = 10^-D.
 // Normalising against middle-grey density dMid:
-//   T_rel = 10^-(D - dMid)  = 10^(dMid - D)
-// Converting to scene-linear stops (output):
-//   stops_out = log2(T_rel) = -(D - dMid) * log2(10) = -densityDelta * 3.322
-// Then reconstructing the scene-linear value and re-encoding via CST:
-//   lin_out  = 0.18 * 2^stops_out
-//   code_out = fromLinear(lin_out, mode)
+//   densityDelta = D - dMid
 //
-// KEY DIFFERENCE FROM THE PREVIOUS -(densityDelta / gamma) APPROACH:
-//   - The old approach used 1/gamma as the scale, which varies per channel
-//     (red=5.0, green=4.0, blue=3.33). This amplified per-channel differences,
-//     causing green to spike above blue in highlights.
-//   - log2(10) ≈ 3.322 is the same for all channels. Colour character now
-//     comes from density differences alone (the forward curve shape), not from
-//     the gamma divisor appearing a second time in the exit ramp.
-//   - The fromLinear call is exact for both ACEScct and DWG — no codeMidGrey
-//     or unitsPerStop approximations needed.
+// Without a print stock, the raw density delta maps to stops via:
+//   stops_out = -densityDelta * log2(10)          [Beer-Lambert alone]
+//
+// But the negative film was never meant to be viewed directly. In the
+// photochemical chain, the negative is contact-printed onto a print stock
+// (e.g. Kodak 2383) which amplifies the density differences through its
+// own gamma. This print gamma is the missing contrast stage that causes
+// shadow crushing and limited output range when omitted.
+//
+// The print stock model multiplies the density delta:
+//   stops_out = -densityDelta * log2(10) * printGamma
+//
+// This is physically correct: the print stock's characteristic curve
+// is approximately linear through its straight-line region, and its
+// slope (gamma) directly scales the negative's density differences.
+// The multiplier is uniform across channels — colour character still
+// comes from per-channel density differences in the negative curve.
+//
+// Middle grey is unaffected: densityDelta = 0 at mid, so printGamma
+// cancels out. The anchoring is exact regardless of the gamma value.
+//
+// Default printGamma = 1.8 approximates a scan-graded projection
+// through 2383 print stock. Phase 2 will replace this with the actual
+// 2383 characteristic curve for a proper composable print stage.
 //
 // SIGMOID CURVE MODEL
 // ─────────────────────────────────────────────────────────────────────────────
-// D = dMin + (dMax - dMin) / (1 + exp(-k * (stops - x0)))
+// D = dMax - (dMax - dMin) / (1 + exp(-k * (stops - x0)))
 //
 //   k  = 4 * gamma / (dMax - dMin)   — derived from datasheet gamma
 //   x0 = inflection point in stops   = (toeEnd + shoulder) / 2
-//
-// Replaces the piecewise toe/straight/shoulder model. No junction
-// approximations, smooth curve everywhere, no 0.3f factor.
 //
 // FILM COLOR CONTROL
 // ─────────────────────────────────────────────────────────────────────────────
@@ -77,9 +83,9 @@ namespace MasterFilm {
         ToneParams mParams;
 
         // LUT parameters — log2 stops domain
-        static constexpr int   kLUTSize   = 4096;
-        static constexpr float kStopsMin  = -8.0f;
-        static constexpr float kStopsMax  =  9.0f;
+        static constexpr int   kLUTSize = 4096;
+        static constexpr float kStopsMin = -8.0f;
+        static constexpr float kStopsMax = 9.0f;
         static constexpr float kStopsRange = kStopsMax - kStopsMin;
 
         // Physical density → stop scale factor (Beer-Lambert law: T = 10^-D)
@@ -106,12 +112,16 @@ namespace MasterFilm {
         static float evaluateCurve(float stops, const ChannelCurve& c);
         float        sampleLUT(float stops, const std::array<float, kLUTSize>& lut) const;
 
-        // Exit ramp: density → output code value via exact Beer-Lambert transmission.
-        // density_delta = density - density_at_middle_grey
-        // stops_out     = -density_delta * log2(10)   [T = 10^-D transmission model]
+        // Exit ramp: density → output code value via Beer-Lambert + print gamma.
+        // density_delta = density - dMid
+        // stops_out     = -density_delta * log2(10) * printGamma
         // lin_out       = 0.18 * 2^stops_out
-        // code_out      = fromLinear(lin_out, mode)   [exact, no linear approximation]
-        static float densityToCode(float density, float dMid, ColorSpaceMode mode);
+        // code_out      = fromLinear(lin_out, mode)
+        //
+        // printGamma amplifies density differences — models the print stock's
+        // contrast contribution. Middle grey is unaffected (delta=0).
+        static float densityToCode(float density, float dMid,
+            float printGamma, ColorSpaceMode mode);
     };
 
 } // namespace MasterFilm
