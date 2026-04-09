@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mempalace": {
+      "command": "C:/Users/mybri/AppData/Local/Programs/Python/Python313/python.exe",
+      "args": ["-m", "mempalace.mcp_server"],
+      "type": "stdio"
+    },
+    "better-code-review-graph": {
+      "command": "C:/Users/mybri/AppData/Local/Programs/Python/Python313/python.exe",
+      "args": ["-m", "better_code_review_graph"],
+      "type": "stdio"
+    }
+  }
+}

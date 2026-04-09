@@ -1,0 +1,14 @@
+wing: masterfilm
+rooms:
+- name: cmake
+  description: Files from cmake/
+- name: openfx_sdk
+  description: Files from openfx-sdk/
+- name: shaders
+  description: Files from shaders/
+- name: src
+  description: Files from src/
+- name: frontend
+  description: Files from ui/
+- name: general
+  description: Files that don't fit other rooms
