@@ -6,6 +6,7 @@
 
 #include <string>
 #include <array>
+#include "../processors/FilmStockProfile.h"
 
 namespace MasterFilm {
 
@@ -187,6 +188,14 @@ namespace MasterFilm {
         AcutanceParams acutance;
         ToneParams     tone;
         ColorParams    color;
+
+        // ── Stochastic grain engine profile ──────────────────────────────────
+        // GPU-transferable parameterisation of this stock's grain characteristics.
+        // Carries the full model: morphology, AR correlation, spectral matrix,
+        // tonal LUT, and chroma micro-contrast.  The GrainProcessor reads this
+        // directly — the legacy GrainParams above are retained for the UI layer
+        // and backward compatibility with LiteUI's perceptual sliders.
+        FilmStockProfile grainProfile;
 
         std::string closestStockId;
         float       closestStockConfidence = 0.0f;
