@@ -12,3 +12,81 @@ rooms:
   description: Files from ui/
 - name: general
   description: Files that don't fit other rooms
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARCHITECTURAL CHANGE LOG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+changes:
+- id: stochastic-grain-engine
+  date: 2026-04-12
+  branch: claude/film-grain-gpu-kernel-mQJG4
+  commits:
+    - fb81b5f  # Implement stochastic film grain engine with FilmStockProfile and GPU kernel
+    - 63e6ec4  # Wire FilmStockProfile into FilmPreset and populate 500T with stock-accurate values
+    - 5d45d09  # Remove legacy GrainParams — FilmStockProfile is now the sole grain data model
+  summary: >
+    Replaced the Phase 1 grain system (GrainParams + hash-based monochromatic
+    noise with Gaussian zone weighting) with a fully parameterised stochastic
+    film grain engine.  FilmStockProfile is now the sole grain data model,
+    from preset definition through GPU uniform upload.
+
+  what_was_added:
+    - src/processors/FilmStockProfile.h   # GPU-transferable POD struct (all grain params)
+    - src/processors/FilmStockProfile.cpp # Tonal LUT generators (DLT, reversal, B&W, flat)
+
+  what_was_rewritten:
+    - shaders/glsl/grain.glsl             # Full stochastic kernel (7 algorithmic sections)
+    - src/processors/GrainProcessor.h     # Now accepts FilmStockProfile only
+    - src/processors/GrainProcessor.cpp   # CPU fallback matches GPU algorithm exactly
+
+  what_was_removed:
+    - GrainParams struct (FilmPreset.h)
+    - buildDefaultProfile() bridge (FilmStockProfile.h/cpp)
+    - Legacy GrainProcessor(GrainParams) constructor
+    - Old grain uniform upload in MasterFilmPlugin.cpp (uAmount/uSigma/uRoughness/uZoneWeights/uSeed)
+    - Old ProUI grain sliders (Amount, Size, Roughness, Shadow, Mids, Highlights)
+
+  what_was_updated:
+    - src/presets/FilmPreset.h            # grainProfile replaces grain member
+    - src/presets/StockLibrary.cpp        # 500T carries full FilmStockProfile (T-Grain, DLT LUT, tungsten spectral matrix)
+    - src/MasterFilmPlugin.cpp            # Grain pass uploads 12 FilmStockProfile uniforms
+    - src/ui/ProUI.h/cpp                  # 5 new grain params (Intensity, Size, Color Noise, Clumping, Morphology)
+    - src/ui/LiteUI.cpp                   # Grain slider scales rms_granularity + chroma_micro_contrast
+
+  filmsockprofile_fields:
+    - rms_granularity      # float — global amplitude (σ_D × 1000)
+    - morphology_type      # int32 — 0=Cubic (Gaussian), 1=T-Grain (log-normal)
+    - ar_coefficients[4]   # float[4] — AR ring weights for spatial clumping
+    - ar_sigma             # float — AR innovation variance
+    - spectral_matrix[9]   # float[9] — 3×3 dye layer crosstalk (row-major)
+    - chroma_micro_contrast # float — 0=mono, 1=full per-channel decorrelation
+    - tonal_lut[64]        # float[64] — luminance → amplitude (DLT simulation)
+    - global_seed          # uint32 — deterministic PRNG base
+    - frame_index          # int32 — combined with seed: Hash(seed + frame)
+    - grain_size           # float — [0,1] slider mapped to PSD sigma
+    - iso                  # float — ISO speed reference
+    - overlap_pixels       # int32 — halo for future compute-shader tiling
+
+  grain_shader_sections:
+    1: Deterministic PRNG (Wang hash, seed = Hash(global_seed + frame_index))
+    2: Noise generation (per-pixel hash + Box-Muller → Gaussian)
+    3: Morphology shaping (Cubic=identity, T-Grain=centered log-normal)
+    4: AR spatial correlation (symmetric FIR, 4 concentric rings, variance-normalised)
+    5: Tonal LUT sampling (64-entry uniform array, linear interpolation)
+    6: Size-to-sigma mapping (ISO-based)
+    7: Main kernel (chroma blend → spectral matrix → tonal modulation → additive composite)
+
+  kodak_500t_profile:
+    morphology: T-Grain
+    ar_coefficients: [0.42, 0.18, 0.06, 0.00]
+    spectral_matrix: tungsten 3200K bias (elevated G→B=0.15, B→G=0.10)
+    tonal_lut: DLT curve (shadowFloor=0.25, midPeak=1.0, highlightRolloff=1.2)
+    chroma_micro_contrast: 0.35
+    rms_granularity: 12.0
+
+  open_items:
+    - Other 7 stocks need grainProfile population (50D, Double-X, Ektachrome, etc.)
+    - ProUI readParams()/applyPreset() still TODO — sliders defined but not wired
+    - processGPU() uniform upload is documented but dispatch still returns kOfxStatReplyDefault
+    - Metal shader path not yet implemented
