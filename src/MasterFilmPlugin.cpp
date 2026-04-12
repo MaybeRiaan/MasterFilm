@@ -327,8 +327,11 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
 
     MasterFilm::HalationProcessor halationProc(preset->halation);
 
-    const int renderSeed = static_cast<int>(renderTime * 24.0);
-    MasterFilm::GrainProcessor grainProc(preset->grain);
+    // Set the per-frame seed from render time into the stock's grain profile.
+    MasterFilm::FilmStockProfile grainProfile = preset->grainProfile;
+    grainProfile.frame_index = static_cast<int32_t>(renderTime * 24.0);
+    const int renderSeed = grainProfile.frame_index;  // kept for CPU fallback API compat
+    MasterFilm::GrainProcessor grainProc(grainProfile);
 
     MasterFilm::AcutanceProcessor acutanceProc(preset->acutance);
 
@@ -449,20 +452,26 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                 }
 
                 // Pass 3 — Grain  (texB → fboA; result overwrites texA)
-                //   uAmount = 0 when grain is disabled → shader outputs src unchanged.
+                //   uRMSGranularity = 0 when grain is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->grainShader();
-                    // Inline GrainProcessor::sizeToSigma (it is private): k * sqrt(iso/100) * (0.3 + size*2.7)
-                    const float k = 0.35f;
-                    const float sigma = k * std::sqrt(preset->grain.iso / 100.0f)
-                                          * (0.3f + preset->grain.size * 2.7f);
+                    const MasterFilm::FilmStockProfile& gp = grainProfile;
+
                     glUseProgram(prog.id);
-                    glUniform1f(prog.loc("uAmount"),    enableGrain ? preset->grain.amount : 0.0f);
-                    glUniform1f(prog.loc("uSigma"),     sigma);
-                    glUniform1f(prog.loc("uRoughness"), preset->grain.roughness);
-                    glUniform3f(prog.loc("uZoneWeights"),
-                                preset->grain.shadowWeight, preset->grain.midWeight, preset->grain.highlightWeight);
-                    glUniform1i(prog.loc("uSeed"),      renderSeed);
+                    glUniform1f(prog.loc("uRMSGranularity"),
+                                enableGrain ? gp.rms_granularity : 0.0f);
+                    glUniform1i(prog.loc("uMorphologyType"),      gp.morphology_type);
+                    glUniform4fv(prog.loc("uARCoefficients"),  1, gp.ar_coefficients);
+                    glUniform1f(prog.loc("uARSigma"),             gp.ar_sigma);
+                    glUniformMatrix3fv(prog.loc("uSpectralMatrix"), 1, GL_TRUE,
+                                       gp.spectral_matrix);
+                    glUniform1f(prog.loc("uChromaMicroContrast"),  gp.chroma_micro_contrast);
+                    glUniform1fv(prog.loc("uTonalLUT"),
+                                 MasterFilm::kTonalLUTSize, gp.tonal_lut);
+                    glUniform1ui(prog.loc("uGlobalSeed"),         gp.global_seed);
+                    glUniform1i(prog.loc("uFrameIndex"),          gp.frame_index);
+                    glUniform1f(prog.loc("uGrainSize"),           gp.grain_size);
+                    glUniform1f(prog.loc("uISO"),                 gp.iso);
                     glUseProgram(0);
                     gl->renderPass(prog, texB, fboA, width, height);   // result now in texA
                 }

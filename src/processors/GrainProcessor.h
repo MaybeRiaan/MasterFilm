@@ -9,7 +9,6 @@
 // CPU path : full fallback implementing the identical algorithm.
 #pragma once
 
-#include "../presets/FilmPreset.h"
 #include "FilmStockProfile.h"
 #include "ofxImageEffect.h"
 
@@ -18,13 +17,8 @@ namespace MasterFilm {
 class GrainProcessor {
 public:
     // ── Construction ──────────────────────────────────────────────────────
-    // Preferred: construct directly from a FilmStockProfile.
     explicit GrainProcessor(const FilmStockProfile& profile)
         : mProfile(profile) {}
-
-    // Legacy: construct from the old GrainParams (auto-converts to profile).
-    explicit GrainProcessor(const GrainParams& params)
-        : mProfile(buildDefaultProfile(params)) {}
 
     // ── GPU dispatch ──────────────────────────────────────────────────────
     // Renders grain via the GLSL / Metal shader.
@@ -55,9 +49,6 @@ public:
     // ── Profile access ────────────────────────────────────────────────────
     void setProfile(const FilmStockProfile& p)   { mProfile = p; }
     const FilmStockProfile& profile() const      { return mProfile; }
-
-    // Legacy API shim — converts and stores as profile internally.
-    void setParams(const GrainParams& p) { mProfile = buildDefaultProfile(p); }
 
 private:
     FilmStockProfile mProfile;

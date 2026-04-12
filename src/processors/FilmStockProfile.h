@@ -204,9 +204,6 @@ struct FilmStockProfile {
     int32_t _pad0 = 0;
 };
 
-// ── Forward declaration ──────────────────────────────────────────────────────
-struct GrainParams;
-
 // ── Tonal LUT generators ─────────────────────────────────────────────────────
 // Host-side utilities to populate FilmStockProfile::tonal_lut from
 // physically-motivated curve models.
@@ -238,11 +235,5 @@ void generateClassicBWTonalLUT(float* lut, int size,
 
 // Flat response — 1.0 everywhere.  Uniform grain, no tonal modulation.
 void generateFlatTonalLUT(float* lut, int size);
-
-// ── Profile builder ──────────────────────────────────────────────────────────
-// Constructs a FilmStockProfile from the legacy GrainParams struct,
-// using sensible defaults for fields that GrainParams does not carry
-// (spectral matrix, AR coefficients, tonal LUT).
-FilmStockProfile buildDefaultProfile(const GrainParams& params);
 
 } // namespace MasterFilm

@@ -10,13 +10,12 @@ namespace MasterFilm {
 namespace ProUI {
 
 // Parameter name constants (used as OFX param identifiers)
-// ── Grain ─────────────────────────────────────────────────────────────────────
-static constexpr const char* kGrainAmount          = "grainAmount";
+// ── Grain (FilmStockProfile) ──────────────────────────────────────────────────
+static constexpr const char* kGrainIntensity       = "grainIntensity";
 static constexpr const char* kGrainSize            = "grainSize";
-static constexpr const char* kGrainRoughness       = "grainRoughness";
-static constexpr const char* kGrainShadowWeight    = "grainShadowWeight";
-static constexpr const char* kGrainMidWeight       = "grainMidWeight";
-static constexpr const char* kGrainHighlightWeight = "grainHighlightWeight";
+static constexpr const char* kGrainColorNoise      = "grainColorNoise";
+static constexpr const char* kGrainMorphology      = "grainMorphology";
+static constexpr const char* kGrainClumping        = "grainClumping";
 
 // ── Halation ──────────────────────────────────────────────────────────────────
 static constexpr const char* kHalationIntensity  = "halationIntensity";

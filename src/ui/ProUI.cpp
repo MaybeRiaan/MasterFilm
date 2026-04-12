@@ -59,13 +59,26 @@ OfxStatus defineParameters(OfxImageEffectHandle descriptor)
         }
     }
 
-    // ── Grain section ─────────────────────────────────────────────────────────
-    defineDouble(paramSet, kGrainAmount,    0.0, 1.0, 0.5, "Amount",          "Overall grain intensity.");
-    defineDouble(paramSet, kGrainSize,      0.0, 1.0, 0.5, "Size",            "Grain particle size (maps to PSD sigma).");
-    defineDouble(paramSet, kGrainRoughness, 0.0, 1.0, 0.5, "Roughness",       "Grain clumping / clustering tendency.");
-    defineDouble(paramSet, kGrainShadowWeight,    0.0, 1.0, 0.4, "Shadow",    "Grain weight in shadow zone.");
-    defineDouble(paramSet, kGrainMidWeight,       0.0, 1.0, 0.45, "Mids",     "Grain weight in mid-tone zone.");
-    defineDouble(paramSet, kGrainHighlightWeight, 0.0, 1.0, 0.15, "Highlights","Grain weight in highlight zone.");
+    // ── Grain section (FilmStockProfile) ─────────────────────────────────────
+    defineDouble(paramSet, kGrainIntensity,  0.0, 2.0, 1.0, "Intensity",
+                 "RMS granularity multiplier (1.0 = stock reference).");
+    defineDouble(paramSet, kGrainSize,       0.0, 1.0, 0.5, "Size",
+                 "Grain particle size — maps to spatial frequency sigma.");
+    defineDouble(paramSet, kGrainColorNoise, 0.0, 1.0, 0.35,"Color Noise",
+                 "Chroma micro-contrast: 0 = monochromatic, 1 = full colour grain.");
+    defineDouble(paramSet, kGrainClumping,   0.0, 1.0, 0.42,"Clumping",
+                 "Spatial agglomeration — higher values produce larger grain clusters.");
+    {
+        OfxPropertySetHandle props;
+        gParamSuite->paramDefine(paramSet, kOfxParamTypeChoice,
+                                 kGrainMorphology, &props);
+        gPropSuite->propSetString(props, kOfxPropLabel, 0, "Morphology");
+        gPropSuite->propSetString(props, kOfxParamPropHint, 0,
+            "Grain crystal shape. Cubic = classic. T-Grain = modern tabular.");
+        gPropSuite->propSetInt(props, kOfxParamPropDefault, 0, 0);
+        gPropSuite->propSetString(props, kOfxParamPropChoiceOption, 0, "Cubic");
+        gPropSuite->propSetString(props, kOfxParamPropChoiceOption, 1, "T-Grain");
+    }
 
     // ── Halation section ──────────────────────────────────────────────────────
     defineDouble(paramSet, kHalationIntensity, 0.0, 1.0, 0.3,  "Intensity",  "Overall halation strength.");

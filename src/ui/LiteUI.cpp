@@ -40,9 +40,14 @@ FilmPreset toFilmPreset(double grain, double glow, double sharpness,
 {
     FilmPreset p = base;  // Start from reference stock
 
-    // ── Grain: scale amount + roughness from slider ───────────────────────────
-    p.grain.amount    = static_cast<float>(grain);
-    p.grain.roughness = static_cast<float>(0.3 + grain * 0.4);  // More roughness at high grain
+    // ── Grain: scale RMS granularity + chroma micro-contrast from slider ────
+    // At 0.5 (default), multiplier = 1.0 → base stock values unchanged.
+    // At 0.0 → rms = 0 (no grain).  At 1.0 → rms = 2× base.
+    p.grainProfile.rms_granularity = base.grainProfile.rms_granularity
+                                   * static_cast<float>(grain * 2.0);
+    // More grain → more color noise (chroma micro-contrast scales gently)
+    p.grainProfile.chroma_micro_contrast = base.grainProfile.chroma_micro_contrast
+                                         * static_cast<float>(0.6 + grain * 0.8);
 
     // ── Glow (halation): intensity + radius ───────────────────────────────────
     p.halation.intensity = static_cast<float>(glow * 0.6);

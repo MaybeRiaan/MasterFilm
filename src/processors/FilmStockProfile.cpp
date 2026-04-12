@@ -1,9 +1,7 @@
 // src/processors/FilmStockProfile.cpp
 // Host-side utilities for FilmStockProfile:
 //   - Tonal LUT generators (DLT, reversal, classic B&W, flat)
-//   - Legacy GrainParams → FilmStockProfile bridge
 #include "FilmStockProfile.h"
-#include "../presets/FilmPreset.h"
 
 #include <algorithm>
 #include <cmath>
@@ -115,63 +113,6 @@ void generateFlatTonalLUT(float* lut, int size)
 {
     for (int i = 0; i < size; ++i)
         lut[i] = 1.0f;
-}
-
-// ── Profile builder from legacy GrainParams ──────────────────────────────────
-//
-// Maps the 8 fields of GrainParams to a full FilmStockProfile with sensible
-// defaults for the new stochastic parameters.  The old zone-weight triplet
-// (shadow/mid/highlight) is converted into a tonal LUT that approximates
-// the same Gaussian blend the legacy shader used.
-
-FilmStockProfile buildDefaultProfile(const GrainParams& gp)
-{
-    FilmStockProfile p;
-
-    // Direct mappings
-    p.rms_granularity = gp.rmsGranularity;
-    p.grain_size      = gp.size;
-    p.iso             = gp.iso;
-
-    // Morphology: ISO >= 200 and finer grain → likely T-Grain stock
-    // This is a heuristic; the caller should override for specific stocks.
-    p.morphology_type = static_cast<int32_t>(GrainMorphology::Cubic);
-
-    // Chroma micro-contrast from roughness (legacy 'roughness' controlled
-    // per-channel decorrelation — conceptually similar)
-    p.chroma_micro_contrast = gp.roughness;
-
-    // Spectral matrix: identity (no crosstalk) — legacy model had none
-    for (int i = 0; i < 9; ++i)
-        p.spectral_matrix[i] = (i % 4 == 0) ? 1.0f : 0.0f;
-
-    // AR coefficients: moderate defaults (generic film)
-    p.ar_coefficients[0] = 0.35f;
-    p.ar_coefficients[1] = 0.12f;
-    p.ar_coefficients[2] = 0.0f;
-    p.ar_coefficients[3] = 0.0f;
-    p.ar_sigma = 1.0f;
-
-    // Tonal LUT: convert legacy zone weights to a continuous curve.
-    // The legacy model used three Gaussian bells at luma = 0.15, 0.50, 0.85
-    // with sigma = 0.18, 0.22, 0.18 respectively.
-    for (int i = 0; i < kTonalLUTSize; ++i) {
-        float t = static_cast<float>(i) / static_cast<float>(kTonalLUTSize - 1);
-
-        auto gauss = [](float x, float mu, float sig) -> float {
-            float d = (x - mu) / sig;
-            return std::exp(-0.5f * d * d);
-        };
-
-        float wS = gauss(t, 0.15f, 0.18f) * gp.shadowWeight;
-        float wM = gauss(t, 0.50f, 0.22f) * gp.midWeight;
-        float wH = gauss(t, 0.85f, 0.18f) * gp.highlightWeight;
-
-        // Scale by amount to bake the old 'amount' slider into the LUT
-        p.tonal_lut[i] = (wS + wM + wH) * gp.amount;
-    }
-
-    return p;
 }
 
 } // namespace MasterFilm

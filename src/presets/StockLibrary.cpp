@@ -65,15 +65,6 @@ namespace MasterFilm {
             p.category = "Cinema";
             p.notes = "Derived from H-1-5219 sensitometric data. ECN-2 process.";
 
-            p.grain.iso = 500.0f;
-            p.grain.rmsGranularity = 12.0f;
-            p.grain.amount = 0.52f;
-            p.grain.size = 0.48f;
-            p.grain.roughness = 0.44f;
-            p.grain.shadowWeight = 0.40f;
-            p.grain.midWeight = 0.44f;
-            p.grain.highlightWeight = 0.16f;
-
             p.halation.intensity = 0.35f;
             p.halation.radius = 0.45f;
             p.halation.threshold = 0.72f;
