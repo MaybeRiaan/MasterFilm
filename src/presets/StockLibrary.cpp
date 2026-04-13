@@ -116,13 +116,31 @@ namespace MasterFilm {
             // Film colour at full — user can dial down to 0 for tone-only
             p.tone.filmColor = 0.55f;
 
-            // Print gamma — models 2383 print stock contrast amplification.
+            // Timing — neutral printer lights (no exposure offset)
+            p.timing.printerLightR = 25.0f;
+            p.timing.printerLightG = 25.0f;
+            p.timing.printerLightB = 25.0f;
+
+            // Print stock — models 2383 print stock contrast amplification.
             // 1.8 gives shadows at ~0.24 and highlights at ~0.88 ACEScct (green),
             // filling the usable scope range. Phase 2 will replace this with
             // the actual 2383 characteristic curve.
-            p.tone.printGamma = 1.8f;
+            p.print.printGamma = 1.8f;  // used in LINEAR mode only
+            p.print.usePrintCurve = true;
+            // Per-channel 2383 print curves (from datasheet F002_1254AC)
+            // Parameters in rawStops domain: {dMin, dMax, gamma_stops, x0_stops}
+            p.print.printRed   = { 0.06f, 3.60f, 0.753f, -1.05f };
+            p.print.printGreen = { 0.06f, 3.90f, 0.753f, -1.33f };
+            p.print.printBlue  = { 0.06f, 4.20f, 0.813f, -1.51f };
+            // Spectral matrix: identity (no print-stock dye cross-talk yet)
+            p.print.spectralMatrix = {
+                1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 1.0f
+            };
 
-            // Inter-layer coupling from published SMPTE density matrix data
+            // Inter-layer coupling from published SMPTE density matrix data.
+            // Applied in density space inside the unified processor.
             p.color.couplingMatrix = {
                  1.00f, -0.08f,  0.02f,
                 -0.05f,  1.00f, -0.03f,
@@ -134,7 +152,6 @@ namespace MasterFilm {
             p.color.satShadow = 0.90f;
             p.color.satMid = 1.00f;
             p.color.satHighlight = 0.95f;
-            p.color.orangeMask = false;
 
             mPresets.push_back(p);
         }

@@ -7,8 +7,7 @@
 #include "ofxImageEffect.h"
 #include "ofxPixels.h"
 
-#include "processors/ToneProcessor.h"
-#include "processors/ColorProcessor.h"
+#include "processors/UnifiedFilmProcessor.h"
 #include "processors/HalationProcessor.h"
 #include "processors/GrainProcessor.h"
 #include "processors/AcutanceProcessor.h"
@@ -72,6 +71,14 @@ static void createFloatTexAndFBO(int w, int h, GLuint& tex, GLuint& fbo)
 
 // ── Parameter name constants ──────────────────────────────────────────────────
 static constexpr const char* kParamColorSpace     = "colorSpace";
+
+// Printer lights — per-channel exposure control (Kodak scale 1-50, 25 = neutral)
+static constexpr const char* kParamPrinterLightR  = "printerLightR";
+static constexpr const char* kParamPrinterLightG  = "printerLightG";
+static constexpr const char* kParamPrinterLightB  = "printerLightB";
+
+// Print curve mode — toggles between linear printGamma and 2383 S-curve
+static constexpr const char* kParamUsePrintCurve  = "usePrintCurve";
 
 // Per-pass enable checkboxes — toggled at runtime for debugging / verification.
 static constexpr const char* kParamEnableTone     = "enableTone";
@@ -177,7 +184,7 @@ static OfxStatus onDescribe(OfxImageEffectHandle descriptor)
 #ifdef MASTERFILM_ENABLE_OPENGL
     gPropSuite->propSetString(effectProps, kOfxImageEffectPropOpenGLRenderSupported, 0, "true");
     // Capture the bundle root path (e.g. ".../MasterFilm.ofx.bundle") for shader loading.
-    const char* filePath = nullptr;
+   char* filePath = nullptr;
     gPropSuite->propGetString(effectProps, kOfxPluginPropFilePath, 0, &filePath);
     if (filePath && filePath[0] != '\0') gBundlePath = filePath;
 #endif
@@ -212,6 +219,42 @@ static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
     gPropSuite->propSetInt(paramProps, kOfxParamPropDefault, 0, kColorSpaceACEScct);
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceACEScct, "ACEScct");
     gPropSuite->propSetString(paramProps, kOfxParamPropChoiceOption, kColorSpaceDWG, "DaVinci Wide Gamut");
+
+    // ── Printer lights (Kodak scale: 1-50, 25 = neutral) ─────────────────────
+    // Each unit ≈ 1/12 stop. Adjusts per-channel exposure on the print stock.
+    // Physically equivalent to the lab colourist's primary grading control.
+    {
+        struct PLDef { const char* name; const char* label; const char* hint; };
+        static const PLDef kPLParams[] = {
+            { kParamPrinterLightR, "Printer Light R", "Red printer light (Kodak scale). 25 = neutral." },
+            { kParamPrinterLightG, "Printer Light G", "Green printer light (Kodak scale). 25 = neutral." },
+            { kParamPrinterLightB, "Printer Light B", "Blue printer light (Kodak scale). 25 = neutral." },
+        };
+        for (const auto& pl : kPLParams) {
+            OfxPropertySetHandle plProps;
+            gParamSuite->paramDefine(paramSet, kOfxParamTypeDouble, pl.name, &plProps);
+            gPropSuite->propSetString(plProps, kOfxPropLabel,            0, pl.label);
+            gPropSuite->propSetString(plProps, kOfxParamPropHint,        0, pl.hint);
+            gPropSuite->propSetDouble(plProps, kOfxParamPropMin,         0, 1.0);
+            gPropSuite->propSetDouble(plProps, kOfxParamPropMax,         0, 50.0);
+            gPropSuite->propSetDouble(plProps, kOfxParamPropDefault,     0, 25.0);
+            gPropSuite->propSetDouble(plProps, kOfxParamPropDisplayMin,  0, 22.0);
+            gPropSuite->propSetDouble(plProps, kOfxParamPropDisplayMax,  0, 28.0);
+            gPropSuite->propSetInt(plProps,    kOfxParamPropAnimates,    0, 0);
+        }
+    }
+
+    // ── Print curve toggle ──────────────────────────────────────────────────
+    {
+        OfxPropertySetHandle pcProps;
+        gParamSuite->paramDefine(paramSet, kOfxParamTypeBoolean, kParamUsePrintCurve, &pcProps);
+        gPropSuite->propSetString(pcProps, kOfxPropLabel,         0, "2383 Print Curve");
+        gPropSuite->propSetString(pcProps, kOfxParamPropHint,     0,
+            "ON: Kodak 2383 S-curve with soft toe and shoulder compression. "
+            "OFF: Linear print gamma (original model).");
+        gPropSuite->propSetInt(pcProps,    kOfxParamPropDefault,  0, 1);   // ON by default
+        gPropSuite->propSetInt(pcProps,    kOfxParamPropAnimates, 0, 0);
+    }
 
     // ── Per-pass enable checkboxes (for debugging / isolating passes) ─────────
     // All default ON so the plugin behaves identically to the original out of the box.
@@ -287,6 +330,19 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     const bool enableGrain    = readBool(kParamEnableGrain);
     const bool enableAcutance = readBool(kParamEnableAcutance);
     const bool enableGPU      = readBool(kParamEnableGPU);
+    const bool usePrintCurve  = readBool(kParamUsePrintCurve);
+
+    // ── Read printer lights ──────────────────────────────────────────────────
+    auto readDouble = [&](const char* name, double fallback) -> double {
+        OfxParamHandle h = nullptr;
+        gParamSuite->paramGetHandle(paramSet, name, &h, nullptr);
+        double v = fallback;
+        if (h) gParamSuite->paramGetValue(h, &v);
+        return v;
+    };
+    const double printerLightR = readDouble(kParamPrinterLightR, 25.0);
+    const double printerLightG = readDouble(kParamPrinterLightG, 25.0);
+    const double printerLightB = readDouble(kParamPrinterLightB, 25.0);
 
     // ── Get render window ─────────────────────────────────────────────────────
     OfxRectI renderWindow;
@@ -320,10 +376,17 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     const int nPixels = width * height;
 
     // ── Build processors (shared by GPU and CPU paths) ────────────────────────
-    MasterFilm::ToneProcessor toneProc(preset->tone);
+    // Override timing with live UI values (preset provides defaults)
+    MasterFilm::TimingParams timing = preset->timing;
+    timing.printerLightR = static_cast<float>(printerLightR);
+    timing.printerLightG = static_cast<float>(printerLightG);
+    timing.printerLightB = static_cast<float>(printerLightB);
 
-    MasterFilm::ColorProcessor colorProc(preset->color);
-    colorProc.buildOrangeMaskLUT(preset->tone, preset->tone.printGamma, colorSpaceMode);
+    MasterFilm::PrintParams print = preset->print;
+    print.usePrintCurve = usePrintCurve;
+
+    MasterFilm::UnifiedFilmProcessor filmProc(preset->tone, timing,
+                                              print, preset->color);
 
     MasterFilm::HalationProcessor halationProc(preset->halation);
 
@@ -379,19 +442,18 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                                 static_cast<size_t>(width * kBytesPerPixel));
                 }
 
-                // CPU pre-passes: Tone and Color — honour enable checkboxes.
-                // When disabled, memcpy preserves the ping-pong invariant.
+                // CPU pre-pass: Unified film processor (Tone+Color combined).
+                // When both Tone and Color are disabled, passthrough.
+                // The unified processor handles all four stages internally.
                 const size_t bufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
-                if (enableTone)
-                    toneProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
+                if (enableTone || enableColor)
+                    filmProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
                 else
                     std::memcpy(bufB_cpu.data(), bufA_cpu.data(), bufBytes);
 
-                if (enableColor)
-                    colorProc.processCPU(bufB_cpu.data(), bufA_cpu.data(), width, height, kNComp);
-                else
-                    std::memcpy(bufA_cpu.data(), bufB_cpu.data(), bufBytes);
-                // bufA_cpu now holds the Tone+Color result (or passthrough).
+                // Swap to bufA for consistency with downstream GPU passes.
+                std::swap(bufA_cpu, bufB_cpu);
+                // bufA_cpu now holds the unified film result (or passthrough).
 
                 // Query host output FBO before any renderPass() call (renderPass rebinds to 0).
                 GLint hostFBO = 0;
@@ -589,23 +651,24 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     static_cast<size_t>(width * kBytesPerPixel));
     }
 
-    // ── Render pipeline: Tone → Color → Halation → Grain → Acutance ──────────
+    // ── Render pipeline: Film → Halation → Grain → Acutance ────────────────────
+    // The unified film processor replaces the old Tone + Color split.
     // Each stage reads from one buffer and writes to the other (ping-pong).
     // When a stage is disabled, memcpy preserves the alternating invariant so
     // the final result always lands in bufB regardless of which stages ran.
     const size_t cpuBufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
 
-    // bufA → Tone → bufB
-    if (enableTone)
-        toneProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
+    // bufA → Film (Tone+Color unified) → bufB
+    if (enableTone || enableColor)
+        filmProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
     else
         std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
 
-    // bufB → Color → bufA
-    if (enableColor)
-        colorProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp);
-    else
-        std::memcpy(bufA.data(), bufB.data(), cpuBufBytes);
+    // bufB → (skip one ping-pong step — was Color) → bufA
+    // The unified processor consumed both Tone and Color in one pass,
+    // so we swap to maintain the ping-pong invariant for downstream stages.
+    std::swap(bufA, bufB);
+    // bufA now has the film result
 
     // bufA → Halation → bufB
     if (enableHalation)

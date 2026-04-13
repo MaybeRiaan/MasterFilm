@@ -159,20 +159,130 @@ namespace MasterFilm {
         float printGamma = 1.8f;
     };
 
-    // ── Color / inter-layer coupling ──────────────────────────────────────────────
+    // ── Timing / printer lights ─────────────────────────────────────────────────
+    //
+    // Models the photochemical printer's per-channel exposure control.
+    // In the lab, printer lights adjust the exposure of each colour channel
+    // independently when contact-printing the negative onto the print stock.
+    // This is the colourist's primary grading tool in the photochemical chain.
+    //
+    // Kodak scale: 1-50, where 25 = neutral (no exposure offset).
+    // Each unit ≈ 1/12 stop. The conversion is:
+    //   stop_offset = (light - 25) / 12.0
+    //
+    // In the pipeline, printer lights are applied as stop offsets to the
+    // density values coming out of the negative curve, BEFORE the print
+    // stage amplifies them. This matches the physical placement: printer
+    // lights modify the exposure hitting the print stock.
+    struct TimingParams {
+        float printerLightR = 25.0f;  // neutral = 25 (Kodak scale)
+        float printerLightG = 25.0f;
+        float printerLightB = 25.0f;
+    };
+
+    // ── Print stock ──────────────────────────────────────────────────────────────
+    //
+    // Models the print stock's contribution to the final image.
+    //
+    // PRINT GAMMA
+    // ─────────────────────────────────────────────────────────────────────────────
+    // The print stock's characteristic curve is approximately linear through
+    // its straight-line region. The slope (gamma) directly scales the
+    // negative's density differences:
+    //   stops_out = -(densityDelta) * log2(10) * printGamma
+    //
+    // Phase 2 will replace this linear multiplier with the actual 2383
+    // characteristic curve (baked as a LUT) for a proper composable print
+    // stage with its own toe and shoulder.
+    //
+    // SPECTRAL MATRIX
+    // ─────────────────────────────────────────────────────────────────────────────
+    // The 3×3 spectral coupling matrix models the print stock's dye-layer
+    // cross-talk. Each dye layer in the print stock absorbs some light from
+    // adjacent spectral bands, creating inter-channel coupling.
+    //
+    // At identity, no cross-talk occurs. Per-stock matrices can be derived
+    // from published SMPTE dye-density data for the print stock.
+    //
+    // Applied in density space (between negative curve and exit ramp) so
+    // that the matrix operates on physically meaningful values.
+    struct PrintParams {
+        // Print gamma — used in LINEAR mode only (no print curve).
+        // Straight-line slope of the print stock's transfer function.
+        // stopsOut = rawStops × printGamma. Ignored when usePrintCurve = true.
+        float printGamma = 1.8f;
+
+        // Spectral coupling matrix — applied in density space.
+        // Identity = no cross-channel coupling.
+        std::array<float, 9> spectralMatrix = {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f
+        };
+
+        // ── 2383 print curve simulation ──────────────────────────────────
+        //
+        // When enabled, replaces the linear printGamma multiplier with
+        // per-channel H&D sigmoid curves modelling the Kodak 2383 print
+        // stock's three dye layers (cyan, magenta, yellow).
+        //
+        // Each channel uses a sigmoid: evaluateCurve(rawStops, printCurve)
+        // which returns print density. The density is then converted to
+        // output via Beer-Lambert (same as the negative exit ramp).
+        //
+        // The per-channel curves produce natural colour separation from
+        // the print stock — each dye layer has its own gamma, dMax, and
+        // operating-point offset, creating subtle colour shifts in shadows
+        // and highlights that are characteristic of projected 2383 prints.
+        //
+        // Parameters are in rawStops domain (log₂, relative to mid grey).
+        // Derived from published Kodak 2383 sensitometric data:
+        //   - F002_1254AC: H&D curves (ECP-2D, Status A densitometry)
+        //   - gamma converted: gamma_stops = gamma_logE / log₂(10)
+        //   - x0 computed so that aim density falls at rawStops = 0
+        //     (LAD aim: R=1.09, G=1.06, B=1.03 Status A)
+        //
+        // When disabled, falls back to: stopsOut = rawStops × printGamma.
+        bool usePrintCurve = false;
+
+        // Per-channel print H&D curves (used when usePrintCurve = true)
+        // Red / cyan dye layer — lowest dMax, slightly steeper at operating point
+        ChannelCurve printRed   = { 0.06f, 3.60f, 0.753f, -1.05f };
+        // Green / magenta dye layer — reference channel
+        ChannelCurve printGreen = { 0.06f, 3.90f, 0.753f, -1.33f };
+        // Blue / yellow dye layer — highest dMax, steepest gamma
+        ChannelCurve printBlue  = { 0.06f, 4.20f, 0.813f, -1.51f };
+    };
+
+    // ── Color / zone-weighted artistic controls ──────────────────────────────────
+    //
+    // Artistic colour adjustments applied AFTER the photochemical model.
+    // These are creative controls, not physical film properties:
+    //   - Inter-layer coupling matrix (from SMPTE density data)
+    //   - Zone-weighted hue shifts and saturation scaling
+    //
+    // The coupling matrix is applied in density space inside the unified
+    // processor, not in encoded RGB space. It models inter-layer dye
+    // coupling in the negative film — a physically correct placement.
     struct ColorParams {
+        // Inter-layer coupling matrix — models negative film dye cross-talk.
+        // Applied in density space (inside the unified processor, between
+        // the H&D curve and the exit ramp).
+        // Identity = no coupling. Non-identity values from SMPTE dye data.
         std::array<float, 9> couplingMatrix = {
             1.0f, 0.0f, 0.0f,
             0.0f, 1.0f, 0.0f,
             0.0f, 0.0f, 1.0f
         };
+
+        // Zone-weighted hue shifts (degrees) and saturation scaling.
+        // Applied in encoded output space as artistic post-processing.
         float hueShadowShift = 0.0f;
         float hueMidShift = 0.0f;
         float hueHighlightShift = 0.0f;
         float satShadow = 1.0f;
         float satMid = 1.0f;
         float satHighlight = 1.0f;
-        bool orangeMask = false;
     };
 
     // ── Complete preset ────────────────────────────────────────────────────────────
@@ -186,6 +296,8 @@ namespace MasterFilm {
         HalationParams halation;
         AcutanceParams acutance;
         ToneParams     tone;
+        TimingParams   timing;
+        PrintParams    print;
         ColorParams    color;
 
         std::string closestStockId;

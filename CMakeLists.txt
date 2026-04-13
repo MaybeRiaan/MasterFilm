@@ -80,10 +80,8 @@ set(MASTERFILM_SOURCES
     src/processors/HalationProcessor.h
     src/processors/AcutanceProcessor.cpp
     src/processors/AcutanceProcessor.h
-    src/processors/ToneProcessor.cpp
-    src/processors/ToneProcessor.h
-    src/processors/ColorProcessor.cpp
-    src/processors/ColorProcessor.h
+    src/processors/UnifiedFilmProcessor.cpp
+    src/processors/UnifiedFilmProcessor.h
     src/presets/FilmPreset.h
     src/presets/FilmPreset.cpp
     src/presets/StockLibrary.h
