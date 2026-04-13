@@ -82,6 +82,8 @@ set(MASTERFILM_SOURCES
     src/processors/AcutanceProcessor.h
     src/processors/UnifiedFilmProcessor.cpp
     src/processors/UnifiedFilmProcessor.h
+    src/processors/FilmStockProfile.cpp
+    src/processors/FilmStockProfile.h
     src/presets/FilmPreset.h
     src/presets/FilmPreset.cpp
     src/presets/StockLibrary.h

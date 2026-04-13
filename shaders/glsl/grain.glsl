@@ -271,7 +271,7 @@ void main()
 
     // ── Grain size → sigma scale factor ──────────────────────────────────
     float sigma = sizeToSigma();
-    float amplitudeBase = (uRMSGranularity / 1000.0) * sigma * 0.04;
+    float amplitudeBase = (uRMSGranularity / 1000.0) * sigma * 2.0;
 
     // ── Per-channel hash offsets (decorrelation constants) ────────────────
     const uint chOff[3] = uint[3](0u, 0xA341316Cu, 0x62D86197u);

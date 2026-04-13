@@ -157,8 +157,11 @@ OfxStatus GrainProcessor::processCPU(const float* src, float* dst,
 
     // ── Pre-compute amplitude scale ───────────────────────────────────────
     // rms_granularity is σ_D × 1000 → divide by 1000 for density units.
+    // The 2.0 scaling maps RMS density units to perceptually correct grain
+    // amplitude in encoded (ACEScct/DWG) space, where ~0.03 code units
+    // corresponds to roughly 0.5 stops of visible grain texture at mid-tones.
     const float sigma = sizeToSigma(prof.grain_size, prof.iso);
-    const float amplitudeBase = (prof.rms_granularity / 1000.0f) * sigma * 0.04f;
+    const float amplitudeBase = (prof.rms_granularity / 1000.0f) * sigma * 2.0f;
 
     // ── Pre-compute AR normalisation factor ───────────────────────────────
     // The AR FIR convolution multiplies noise by various weights.
