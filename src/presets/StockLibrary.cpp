@@ -65,15 +65,6 @@ namespace MasterFilm {
             p.category = "Cinema";
             p.notes = "Derived from H-1-5219 sensitometric data. ECN-2 process.";
 
-            p.grain.iso = 500.0f;
-            p.grain.rmsGranularity = 12.0f;
-            p.grain.amount = 0.52f;
-            p.grain.size = 0.48f;
-            p.grain.roughness = 0.44f;
-            p.grain.shadowWeight = 0.40f;
-            p.grain.midWeight = 0.44f;
-            p.grain.highlightWeight = 0.16f;
-
             p.halation.intensity = 0.35f;
             p.halation.radius = 0.45f;
             p.halation.threshold = 0.72f;
@@ -152,6 +143,82 @@ namespace MasterFilm {
             p.color.satShadow = 0.90f;
             p.color.satMid = 1.00f;
             p.color.satHighlight = 0.95f;
+
+            // ── Stochastic grain profile (FilmStockProfile) ─────────────
+            // Populates the full GPU-transferable grain model for 500T.
+            //
+            // Source data:
+            //   RMS granularity: Kodak H-1-5219, diffuse RMS = 12
+            //   Morphology: T-Grain (Vision3 uses tabular grain technology)
+            //   AR coefficients: moderate clumping — DLT controls agglomeration
+            //   Spectral matrix: tungsten bias — 3200K illuminant under-exposes
+            //     the blue-sensitive layer, producing heavier blue-channel grain
+            //     and stronger inter-layer coupling from blue → green/red
+            //   Tonal LUT: DLT curve — shadow noise suppression via Dye Layering
+            //     Technology, peak at mid-tones, gentle highlight rolloff
+            //   Chroma micro-contrast: moderate — DLT reduces but does not
+            //     eliminate dye cloud misalignment between layers
+            {
+                FilmStockProfile& gp = p.grainProfile;
+
+                gp.rms_granularity = 12.0f;
+                gp.iso             = 500.0f;
+                gp.grain_size      = 0.48f;
+
+                // T-Grain: Vision3 tabular grain crystals — log-normal radius
+                // distribution, flatter coverage, tighter perceived variance
+                // than the cubic crystals used in Tri-X / Double-X.
+                gp.morphology_type = static_cast<int32_t>(GrainMorphology::TGrain);
+
+                // AR spatial correlation — moderate, controlled clumping.
+                // T-Grain + DLT produces a more uniform grain field than
+                // classic cubic stocks; lower a1 than Tri-X (0.55).
+                gp.ar_coefficients[0] = 0.42f;  // ring-1 (4-connected)
+                gp.ar_coefficients[1] = 0.18f;  // ring-1 diagonals
+                gp.ar_coefficients[2] = 0.06f;  // ring-2 (2-pixel axis)
+                gp.ar_coefficients[3] = 0.00f;  // ring-2 diagonals (negligible)
+                gp.ar_sigma = 1.0f;
+
+                // Spectral matrix — tungsten (3200K) bias.
+                // Under tungsten illumination the blue-sensitive layer receives
+                // ~2 stops less light than red/green, resulting in:
+                //   - Higher blue-layer grain (under-exposure → more visible AgX)
+                //   - Stronger blue → green/red coupling (spectral overlap of
+                //     the yellow filter layer is imperfect under low-blue light)
+                //
+                // Row-major: [R→R, G→R, B→R,  R→G, G→G, B→G,  R→B, G→B, B→B]
+                gp.spectral_matrix[0] = 1.00f;  // R→R
+                gp.spectral_matrix[1] = 0.12f;  // G→R
+                gp.spectral_matrix[2] = 0.04f;  // B→R
+                gp.spectral_matrix[3] = 0.08f;  // R→G
+                gp.spectral_matrix[4] = 1.00f;  // G→G
+                gp.spectral_matrix[5] = 0.10f;  // B→G  (blue coupling into green)
+                gp.spectral_matrix[6] = 0.06f;  // R→B
+                gp.spectral_matrix[7] = 0.15f;  // G→B  (strongest off-diagonal —
+                                                 //  green dye interlayer scatter
+                                                 //  into under-exposed blue layer)
+                gp.spectral_matrix[8] = 1.00f;  // B→B
+
+                // Chroma micro-contrast — moderate.
+                // DLT suppresses dye cloud misalignment but doesn't eliminate
+                // it.  0.35 gives subtle colour grain without the heavy chroma
+                // noise seen in reversal stocks (Ektachrome ≈ 0.55).
+                gp.chroma_micro_contrast = 0.35f;
+
+                // Tonal LUT — DLT shadow-suppression curve.
+                // Vision3's Dye Layering Technology smooths shadow grain by
+                // optimising dye cloud placement in low-density regions.
+                //   shadowFloor    = 0.25 (shadow grain reduced to 25% of peak)
+                //   midPeak        = 1.00 (full grain at mid-tones)
+                //   highlightRolloff = 1.20 (gentle — 500T has usable highlights)
+                generateDLTTonalLUT(gp.tonal_lut, kTonalLUTSize,
+                                    0.25f, 1.0f, 1.2f);
+
+                // Deterministic seed — arbitrary, just needs to be consistent
+                gp.global_seed    = 0x5EED0042u;
+                gp.frame_index    = 0;
+                gp.overlap_pixels = 16;
+            }
 
             mPresets.push_back(p);
         }

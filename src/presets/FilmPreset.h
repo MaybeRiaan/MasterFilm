@@ -6,6 +6,7 @@
 
 #include <string>
 #include <array>
+#include "../processors/FilmStockProfile.h"
 
 namespace MasterFilm {
 
@@ -23,18 +24,6 @@ namespace MasterFilm {
     enum class ColorSpaceMode {
         ACEScct = 0,      // ACEScct / AP1 — log, middle grey at 0.4135
         DaVinciWideGamut  // DaVinci Wide Gamut / DaVinci Intermediate — middle grey at ~0.336
-    };
-
-    // ── Grain ─────────────────────────────────────────────────────────────────────
-    struct GrainParams {
-        float amount = 0.5f;
-        float size = 0.5f;
-        float roughness = 0.5f;
-        float shadowWeight = 0.40f;
-        float midWeight = 0.45f;
-        float highlightWeight = 0.15f;
-        float rmsGranularity = 10.0f;
-        float iso = 400.0f;
     };
 
     // ── Halation ──────────────────────────────────────────────────────────────────
@@ -292,7 +281,13 @@ namespace MasterFilm {
         std::string category;
         std::string notes;
 
-        GrainParams    grain;
+        // ── Stochastic grain engine profile ──────────────────────────────────
+        // GPU-transferable parameterisation of this stock's grain characteristics.
+        // Carries the full model: morphology, AR correlation, spectral matrix,
+        // tonal LUT, and chroma micro-contrast.  The GrainProcessor reads this
+        // directly.
+        FilmStockProfile grainProfile;
+
         HalationParams halation;
         AcutanceParams acutance;
         ToneParams     tone;
