@@ -87,6 +87,7 @@ static constexpr const char* kParamEnableHalation = "enableHalation";
 static constexpr const char* kParamEnableGrain    = "enableGrain";
 static constexpr const char* kParamEnableAcutance = "enableAcutance";
 static constexpr const char* kParamEnableGPU      = "enableGPU";
+static constexpr const char* kParamRenderPath     = "renderPath";
 
 // Choice indices — must match option order in onDescribeInContext
 // and correspond to ColorSpaceMode enum values in FilmPreset.h.
@@ -182,7 +183,9 @@ static OfxStatus onDescribe(OfxImageEffectHandle descriptor)
     gPropSuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
 
 #ifdef MASTERFILM_ENABLE_OPENGL
-    gPropSuite->propSetString(effectProps, kOfxImageEffectPropOpenGLRenderSupported, 0, "true");
+    // "optional" tells the host we prefer GPU but can fall back to CPU if no GL context.
+    // "true" would mean "required" — Resolve rejects the plugin if it can't provide GL.
+    gPropSuite->propSetString(effectProps, kOfxImageEffectPropOpenGLRenderSupported, 0, "optional");
     // Capture the bundle root path (e.g. ".../MasterFilm.ofx.bundle") for shader loading.
    char* filePath = nullptr;
     gPropSuite->propGetString(effectProps, kOfxPluginPropFilePath, 0, &filePath);
@@ -277,6 +280,18 @@ static OfxStatus onDescribeInContext(OfxImageEffectHandle descriptor,
         gPropSuite->propSetInt(boolProps,    kOfxParamPropAnimates, 0, 0);
     }
 
+    // ── Render path indicator (read-only, updated each frame) ────────────────
+    {
+        OfxPropertySetHandle rpProps;
+        gParamSuite->paramDefine(paramSet, kOfxParamTypeString, kParamRenderPath, &rpProps);
+        gPropSuite->propSetString(rpProps, kOfxPropLabel,              0, "Render Path");
+        gPropSuite->propSetString(rpProps, kOfxParamPropHint,          0, "Shows which render path is active (GPU or CPU).");
+        gPropSuite->propSetString(rpProps, kOfxParamPropDefault,       0, "---");
+        gPropSuite->propSetInt(rpProps,    kOfxParamPropAnimates,      0, 0);
+        gPropSuite->propSetInt(rpProps,    kOfxParamPropEvaluateOnChange, 0, 0);
+        gPropSuite->propSetInt(rpProps,    kOfxParamPropEnabled,       0, 0);  // greyed out / read-only
+    }
+
     return kOfxStatOK;
 }
 
@@ -331,6 +346,13 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     const bool enableAcutance = readBool(kParamEnableAcutance);
     const bool enableGPU      = readBool(kParamEnableGPU);
     const bool usePrintCurve  = readBool(kParamUsePrintCurve);
+
+    // Helper: update the render path indicator string visible in the UI.
+    auto setRenderPathLabel = [&](const char* label) {
+        OfxParamHandle h = nullptr;
+        gParamSuite->paramGetHandle(paramSet, kParamRenderPath, &h, nullptr);
+        if (h) gParamSuite->paramSetValue(h, label);
+    };
 
     // ── Read printer lights ──────────────────────────────────────────────────
     auto readDouble = [&](const char* name, double fallback) -> double {
@@ -412,7 +434,18 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
             if (it != gGLDispatchers.end()) gl = it->second;
         }
 
+        // Diagnostics — written to stderr so they show in Resolve's console log.
+        if (!gGLSuite)
+            std::fprintf(stderr, "[MasterFilm] GPU: gGLSuite is null — host didn't provide OpenGL render suite\n");
+        else if (!glEnabled)
+            std::fprintf(stderr, "[MasterFilm] GPU: glEnabled=0 — host did not enable OpenGL for this render\n");
+        else if (!gl)
+            std::fprintf(stderr, "[MasterFilm] GPU: GLSLDispatch not found — shader init may have failed\n");
+        else if (!enableGPU)
+            std::fprintf(stderr, "[MasterFilm] GPU: enableGPU checkbox is OFF\n");
+
         if (gl && enableGPU) {
+            setRenderPathLabel("GPU (OpenGL)");
             // GL resource handles — declared before try so catch can clean them up.
             OfxPropertySetHandle srcTexHandle = nullptr;
             GLuint negLUTTex = 0, printLUTTex = 0;
@@ -617,7 +650,8 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
 
                 return kOfxStatOK;
             }
-            catch (...) {
+            catch (const std::exception& ex) {
+                std::fprintf(stderr, "[MasterFilm] GPU exception: %s\n", ex.what());
                 // Clean up any GL resources that were created before the exception.
                 if (negLUTTex)  glDeleteTextures(1, &negLUTTex);
                 if (printLUTTex) glDeleteTextures(1, &printLUTTex);
@@ -659,9 +693,99 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
     }
 #endif // MASTERFILM_ENABLE_OPENGL
 
-    // ── No CPU fallback — GPU is required ────────────────────────────────────
-    // If we reach here, GPU rendering was unavailable or not enabled.
-    return kOfxStatFailed;
+    // ── CPU fallback — runs when host doesn't provide a GL context ─────────
+    // This path is slower (per-pixel CPU loops + heap alloc) but ensures the
+    // plugin works regardless of the host's GPU configuration.
+    setRenderPathLabel("CPU (fallback)");
+    std::fprintf(stderr, "[MasterFilm] Falling back to CPU render path\n");
+
+    OfxPropertySetHandle srcImg = nullptr;
+    OfxPropertySetHandle dstImg = nullptr;
+    gEffectSuite->clipGetImage(srcClip, renderTime, nullptr, &srcImg);
+    gEffectSuite->clipGetImage(dstClip, renderTime, nullptr, &dstImg);
+
+    if (!srcImg || !dstImg) {
+        if (srcImg) gEffectSuite->clipReleaseImage(srcImg);
+        if (dstImg) gEffectSuite->clipReleaseImage(dstImg);
+        return kOfxStatFailed;
+    }
+
+    void* srcPtr = nullptr;
+    void* dstPtr = nullptr;
+    gPropSuite->propGetPointer(srcImg, kOfxImagePropData, 0, &srcPtr);
+    gPropSuite->propGetPointer(dstImg, kOfxImagePropData, 0, &dstPtr);
+
+    int srcRowBytes = 0, dstRowBytes = 0;
+    gPropSuite->propGetInt(srcImg, kOfxImagePropRowBytes, 0, &srcRowBytes);
+    gPropSuite->propGetInt(dstImg, kOfxImagePropRowBytes, 0, &dstRowBytes);
+
+    OfxRectI srcBounds{}, dstBounds{};
+    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 0, &srcBounds.x1);
+    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 1, &srcBounds.y1);
+    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 2, &srcBounds.x2);
+    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 3, &srcBounds.y2);
+    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 0, &dstBounds.x1);
+    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 1, &dstBounds.y1);
+    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 2, &dstBounds.x2);
+    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 3, &dstBounds.y2);
+
+    if (!srcPtr || !dstPtr) {
+        gEffectSuite->clipReleaseImage(srcImg);
+        gEffectSuite->clipReleaseImage(dstImg);
+        return kOfxStatFailed;
+    }
+
+    std::vector<float> bufA(static_cast<size_t>(nPixels * kNComp));
+    std::vector<float> bufB(static_cast<size_t>(nPixels * kNComp));
+
+    for (int y = 0; y < height; ++y) {
+        const float* srcRow = reinterpret_cast<const float*>(
+            static_cast<const char*>(srcPtr)
+            + static_cast<ptrdiff_t>(renderWindow.y1 + y - srcBounds.y1) * srcRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
+        std::memcpy(&bufA[static_cast<size_t>(y * width * kNComp)], srcRow,
+                    static_cast<size_t>(width * kBytesPerPixel));
+    }
+
+    const size_t cpuBufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
+
+    // Film (Tone+Color unified)
+    if (enableTone || enableColor)
+        filmProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
+    std::swap(bufA, bufB);
+
+    // Halation
+    if (enableHalation)
+        halationProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
+
+    // Grain
+    if (enableGrain)
+        grainProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp, renderSeed);
+    else
+        std::memcpy(bufA.data(), bufB.data(), cpuBufBytes);
+
+    // Acutance
+    if (enableAcutance)
+        acutanceProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
+    else
+        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
+
+    for (int y = 0; y < height; ++y) {
+        float* dstRow = reinterpret_cast<float*>(
+            static_cast<char*>(dstPtr)
+            + static_cast<ptrdiff_t>(renderWindow.y1 + y - dstBounds.y1) * dstRowBytes
+            + static_cast<ptrdiff_t>(renderWindow.x1 - dstBounds.x1) * kBytesPerPixel);
+        std::memcpy(dstRow, &bufB[static_cast<size_t>(y * width * kNComp)],
+                    static_cast<size_t>(width * kBytesPerPixel));
+    }
+
+    gEffectSuite->clipReleaseImage(srcImg);
+    gEffectSuite->clipReleaseImage(dstImg);
+    return kOfxStatOK;
 }
 
 static OfxStatus pluginMain(const char* action,

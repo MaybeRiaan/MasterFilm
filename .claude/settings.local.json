@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build build/Release --config Release)",
+      "Bash(cmd //C \"\\\\\"C:\\\\\\\\Program Files\\\\\\\\Microsoft Visual Studio\\\\\\\\2024\\\\\\\\Community\\\\\\\\VC\\\\\\\\Auxiliary\\\\\\\\Build\\\\\\\\vcvarsall.bat\\\\\" x64 >nul 2>&1 && cmake --build build/Release --config Release 2>&1\")",
+      "Read(//c/Program Files/Microsoft Visual Studio//**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio//**)",
+      "Bash(cmd //C \"\\\\\"C:\\\\\\\\Program Files \\(x86\\)\\\\\\\\Microsoft Visual Studio\\\\\\\\Installer\\\\\\\\vswhere.exe\\\\\" -property installationPath 2>&1\")",
+      "Bash(cmd //C \"\\\\\"C:\\\\\\\\Program Files\\\\\\\\Microsoft Visual Studio\\\\\\\\18\\\\\\\\Community\\\\\\\\VC\\\\\\\\Auxiliary\\\\\\\\Build\\\\\\\\vcvarsall.bat\\\\\" x64 >nul 2>&1 && cmake --build build\\\\\\\\Release --config Release 2>&1\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/18/Community/VC/Auxiliary/Build/vcvarsall.bat\" x64)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/18/Community/Common7/Tools/VsDevCmd.bat\" -arch=x64)",
+      "Bash(cmake -B build/Release -G \"Visual Studio 18 2026\" -A x64)",
+      "Bash(rm -rf build/Release/CMakeCache.txt build/Release/CMakeFiles)",
+      "Bash(cmake -B build/Release -G \"Visual Studio 18 2026\" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake)",
+      "Bash(where glew32.dll)",
+      "Read(//c/Program Files/Blackmagic Design/DaVinci Resolve/**)",
+      "Read(//c/Windows/System32/**)"
+    ]
+  }
+}
