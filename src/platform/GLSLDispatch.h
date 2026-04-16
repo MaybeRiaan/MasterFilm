@@ -54,6 +54,10 @@ namespace MasterFilm {
         ShaderProgram& grainShader() { return mGrain; }
         ShaderProgram& acutanceShader() { return mAcutance; }
 
+        // Upload 3 per-channel float arrays into a single RGBA32F texture (size x 1).
+        // R/G/B channels carry the three colour channel LUT values. Returns texture handle.
+        static GLuint uploadLUTRow(const float* chR, const float* chG, const float* chB, int size);
+
     private:
         ShaderProgram mToneColor;
         ShaderProgram mHalationH;

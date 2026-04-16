@@ -162,6 +162,63 @@ private:
     // Luminance coefficients for the current colour space
     static void getLumaCoeffs(ColorSpaceMode mode,
                               float& wR, float& wG, float& wB);
+
+public:
+    // ── GPU data accessors ───────────────────────────────────────────────────
+    // LUT arrays (for uploading as GPU textures)
+    const std::array<float, kLUTSize>& negLUT_R() const { return mLUT_R; }
+    const std::array<float, kLUTSize>& negLUT_G() const { return mLUT_G; }
+    const std::array<float, kLUTSize>& negLUT_B() const { return mLUT_B; }
+    const std::array<float, kPrintLUTSize>& printLUT_R() const { return mPrintLUT_R; }
+    const std::array<float, kPrintLUTSize>& printLUT_G() const { return mPrintLUT_G; }
+    const std::array<float, kPrintLUTSize>& printLUT_B() const { return mPrintLUT_B; }
+
+    // Ensure print LUT is valid for the given mode
+    void ensurePrintLUT(ColorSpaceMode mode) const {
+        if (!mPrintLUTValid || mPrintLUTMode != mode)
+            rebuildPrintLUT(mode);
+    }
+
+    // Compute exit dMid (accounts for filmColor + coupling interaction).
+    // This is param-dependent, not pixel-dependent, so computed on CPU.
+    void getExitDMid(float& r, float& g, float& b) const;
+
+    // Scalar parameter accessors for GPU uniforms
+    float filmColor()     const { return mTone.filmColor; }
+    float dMidR()         const { return mDMidR; }
+    float dMidG()         const { return mDMidG; }
+    float dMidB()         const { return mDMidB; }
+    float coupledDMidR()  const { return mCoupledDMidR; }
+    float coupledDMidG()  const { return mCoupledDMidG; }
+    float coupledDMidB()  const { return mCoupledDMidB; }
+    float timingOffR()    const { return mTimingOffsetR; }
+    float timingOffG()    const { return mTimingOffsetG; }
+    float timingOffB()    const { return mTimingOffsetB; }
+
+    const std::array<float, 9>& couplingMatrix() const { return mColor.couplingMatrix; }
+    bool couplingIsIdentity() const {
+        const auto& m = mColor.couplingMatrix;
+        return m[0]==1.f && m[1]==0.f && m[2]==0.f &&
+               m[3]==0.f && m[4]==1.f && m[5]==0.f &&
+               m[6]==0.f && m[7]==0.f && m[8]==1.f;
+    }
+
+    // Zone color params
+    const ColorParams& colorParams() const { return mColor; }
+
+    // Static constants for LUT domain mapping
+    static constexpr int   gpuLUTSize()      { return kLUTSize; }
+    static constexpr int   gpuPrintLUTSize() { return kPrintLUTSize; }
+    static constexpr float gpuStopsMin()     { return kStopsMin; }
+    static constexpr float gpuStopsRange()   { return kStopsRange; }
+    static constexpr float gpuDeltaMin()     { return kDeltaMin; }
+    static constexpr float gpuDeltaRange()   { return kDeltaRange; }
+    static constexpr float gpuLog2of10()     { return kLog2of10; }
+
+    // Luma coefficients accessor (static, delegates to internal)
+    static void gpuGetLumaCoeffs(ColorSpaceMode mode, float& wR, float& wG, float& wB) {
+        getLumaCoeffs(mode, wR, wG, wB);
+    }
 };
 
 } // namespace MasterFilm

@@ -398,7 +398,7 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
 
     MasterFilm::AcutanceProcessor acutanceProc(preset->acutance);
 
-    // ── GPU path ──────────────────────────────────────────────────────────────
+    // ── GPU-only path ──────────────────────────────────────────────────────────
 #ifdef MASTERFILM_ENABLE_OPENGL
     {
         int glEnabled = 0;
@@ -413,71 +413,123 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
         }
 
         if (gl && enableGPU) {
-            // Declare all GL resource handles before the try so the catch can clean them up.
-            OfxPropertySetHandle gpuSrcImg = nullptr;
-            GLuint cpuTex = 0, texA = 0, texB = 0, fboA = 0, fboB = 0;
+            // GL resource handles — declared before try so catch can clean them up.
+            OfxPropertySetHandle srcTexHandle = nullptr;
+            GLuint negLUTTex = 0, printLUTTex = 0;
+            GLuint texA = 0, texB = 0, texC = 0;
+            GLuint fboA = 0, fboB = 0, fboC = 0;
 
             try {
-                // Fetch source pixels for CPU Tone+Color pre-pass.
-                gEffectSuite->clipGetImage(srcClip, renderTime, nullptr, &gpuSrcImg);
-                if (!gpuSrcImg) throw std::runtime_error("GPU: clipGetImage(src) failed");
+                // ── Load source as GL texture via OFX OpenGL render suite ────
+                OfxStatus texStat = gGLSuite->clipLoadTexture(srcClip, renderTime, nullptr, nullptr, &srcTexHandle);
+                if (texStat != kOfxStatOK || !srcTexHandle)
+                    throw std::runtime_error("GPU: clipLoadTexture(src) failed");
 
-                void* srcPtr = nullptr;
-                gPropSuite->propGetPointer(gpuSrcImg, kOfxImagePropData, 0, &srcPtr);
-                int srcRowBytes = 0;
-                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropRowBytes, 0, &srcRowBytes);
-                OfxRectI srcBounds{};
-                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 0, &srcBounds.x1);
-                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 1, &srcBounds.y1);
-                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 2, &srcBounds.x2);
-                gPropSuite->propGetInt(gpuSrcImg, kOfxImagePropBounds, 3, &srcBounds.y2);
-                if (!srcPtr) throw std::runtime_error("GPU: null srcPtr");
+                int srcTexIndex = 0;
+                gPropSuite->propGetInt(srcTexHandle, kOfxImageEffectPropOpenGLTextureIndex, 0, &srcTexIndex);
+                GLuint srcTex = static_cast<GLuint>(srcTexIndex);
 
-                // Destride source into bufA.
-                std::vector<float> bufA_cpu(static_cast<size_t>(nPixels * kNComp));
-                std::vector<float> bufB_cpu(static_cast<size_t>(nPixels * kNComp));
-                for (int y = 0; y < height; ++y) {
-                    const float* srcRow = reinterpret_cast<const float*>(
-                        static_cast<const char*>(srcPtr)
-                        + static_cast<ptrdiff_t>(renderWindow.y1 + y - srcBounds.y1) * srcRowBytes
-                        + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
-                    std::memcpy(&bufA_cpu[static_cast<size_t>(y * width * kNComp)], srcRow,
-                                static_cast<size_t>(width * kBytesPerPixel));
-                }
+                // Check texture target — Resolve may give GL_TEXTURE_RECTANGLE
+                int srcTexTarget = GL_TEXTURE_2D;
+                gPropSuite->propGetInt(srcTexHandle, kOfxImageEffectPropOpenGLTextureTarget, 0, &srcTexTarget);
+                // For now we require GL_TEXTURE_2D (most common in Resolve GPU mode).
+                // If the host returns GL_TEXTURE_RECTANGLE, fall through to error.
+                if (srcTexTarget != GL_TEXTURE_2D)
+                    throw std::runtime_error("GPU: unsupported texture target (expected GL_TEXTURE_2D)");
 
-                // CPU pre-pass: Unified film processor (Tone+Color combined).
-                // When both Tone and Color are disabled, passthrough.
-                // The unified processor handles all four stages internally.
-                const size_t bufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
-                if (enableTone || enableColor)
-                    filmProc.processCPU(bufA_cpu.data(), bufB_cpu.data(), width, height, kNComp, colorSpaceMode);
-                else
-                    std::memcpy(bufB_cpu.data(), bufA_cpu.data(), bufBytes);
-
-                // Swap to bufA for consistency with downstream GPU passes.
-                std::swap(bufA_cpu, bufB_cpu);
-                // bufA_cpu now holds the unified film result (or passthrough).
-
-                // Query host output FBO before any renderPass() call (renderPass rebinds to 0).
+                // ── Query host output FBO ────────────────────────────────────
                 GLint hostFBO = 0;
                 glGetIntegerv(GL_FRAMEBUFFER_BINDING, &hostFBO);
 
-                // Upload CPU result to a GL texture.
-                glGenTextures(1, &cpuTex);
-                glBindTexture(GL_TEXTURE_2D, cpuTex);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0,
-                             GL_RGBA, GL_FLOAT, bufA_cpu.data());
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glBindTexture(GL_TEXTURE_2D, 0);
+                // ── Build and upload LUT textures ────────────────────────────
+                filmProc.ensurePrintLUT(colorSpaceMode);
 
-                // Create two intermediate ping-pong texture/FBO pairs.
+                negLUTTex = MasterFilm::GLSLDispatch::uploadLUTRow(
+                    filmProc.negLUT_R().data(),
+                    filmProc.negLUT_G().data(),
+                    filmProc.negLUT_B().data(),
+                    MasterFilm::UnifiedFilmProcessor::gpuLUTSize());
+
+                printLUTTex = MasterFilm::GLSLDispatch::uploadLUTRow(
+                    filmProc.printLUT_R().data(),
+                    filmProc.printLUT_G().data(),
+                    filmProc.printLUT_B().data(),
+                    MasterFilm::UnifiedFilmProcessor::gpuPrintLUTSize());
+
+                // ── Create three intermediate texture/FBO pairs ──────────────
+                // texC holds tone/color result (preserved for halation_v uSrc).
+                // texA/texB are the ping-pong pair for subsequent passes.
                 createFloatTexAndFBO(width, height, texA, fboA);
                 createFloatTexAndFBO(width, height, texB, fboB);
+                createFloatTexAndFBO(width, height, texC, fboC);
 
-                // Pass 1 — Halation Horizontal  (cpuTex → fboA; result in texA)
+                // ── Precompute GPU uniforms ──────────────────────────────────
+                float exitDMidR, exitDMidG, exitDMidB;
+                filmProc.getExitDMid(exitDMidR, exitDMidG, exitDMidB);
+
+                float lumaWR, lumaWG, lumaWB;
+                MasterFilm::UnifiedFilmProcessor::gpuGetLumaCoeffs(colorSpaceMode, lumaWR, lumaWG, lumaWB);
+
+                const auto& cm = filmProc.couplingMatrix();
+
+                // ── Pass 0 — Tone + Color  (srcTex → fboC; result in texC) ──
+                {
+                    MasterFilm::ShaderProgram& prog = gl->toneColorShader();
+                    glUseProgram(prog.id);
+
+                    // Bind LUT textures to units 2 and 3
+                    glActiveTexture(GL_TEXTURE2);
+                    glBindTexture(GL_TEXTURE_2D, negLUTTex);
+                    glUniform1i(prog.loc("uNegLUT"), 2);
+
+                    glActiveTexture(GL_TEXTURE3);
+                    glBindTexture(GL_TEXTURE_2D, printLUTTex);
+                    glUniform1i(prog.loc("uPrintLUT"), 3);
+                    glActiveTexture(GL_TEXTURE0);
+
+                    // Color space
+                    glUniform1i(prog.loc("uColorSpaceMode"), colorSpaceChoice);
+
+                    // Neg LUT domain
+                    glUniform1f(prog.loc("uStopsMin"),   MasterFilm::UnifiedFilmProcessor::gpuStopsMin());
+                    glUniform1f(prog.loc("uStopsRange"), MasterFilm::UnifiedFilmProcessor::gpuStopsRange());
+                    glUniform1f(prog.loc("uLUTSize"),    static_cast<float>(MasterFilm::UnifiedFilmProcessor::gpuLUTSize()));
+
+                    // Print LUT domain
+                    glUniform1f(prog.loc("uDeltaMin"),      MasterFilm::UnifiedFilmProcessor::gpuDeltaMin());
+                    glUniform1f(prog.loc("uDeltaRange"),    MasterFilm::UnifiedFilmProcessor::gpuDeltaRange());
+                    glUniform1f(prog.loc("uPrintLUTSize"),  static_cast<float>(MasterFilm::UnifiedFilmProcessor::gpuPrintLUTSize()));
+
+                    // Film parameters
+                    glUniform1f(prog.loc("uFilmColor"),  filmProc.filmColor());
+                    glUniform3f(prog.loc("uExitDMid"),   exitDMidR, exitDMidG, exitDMidB);
+                    glUniform3f(prog.loc("uTimingOffset"),
+                                filmProc.timingOffR(), filmProc.timingOffG(), filmProc.timingOffB());
+                    glUniform1f(prog.loc("uLog2of10"),   MasterFilm::UnifiedFilmProcessor::gpuLog2of10());
+
+                    // Coupling matrix (row-major float[9] → GLSL mat3 column-major with GL_TRUE transpose)
+                    glUniformMatrix3fv(prog.loc("uCouplingMatrix"), 1, GL_TRUE, cm.data());
+                    glUniform1i(prog.loc("uCouplingIsIdentity"), filmProc.couplingIsIdentity() ? 1 : 0);
+
+                    // Enable flags
+                    glUniform1i(prog.loc("uEnableTone"),  enableTone  ? 1 : 0);
+                    glUniform1i(prog.loc("uEnableColor"), enableColor ? 1 : 0);
+
+                    // Zone color parameters
+                    const auto& cp = filmProc.colorParams();
+                    glUniform1f(prog.loc("uHueShadow"),    cp.hueShadowShift);
+                    glUniform1f(prog.loc("uHueMid"),       cp.hueMidShift);
+                    glUniform1f(prog.loc("uHueHighlight"), cp.hueHighlightShift);
+                    glUniform1f(prog.loc("uSatShadow"),    cp.satShadow);
+                    glUniform1f(prog.loc("uSatMid"),       cp.satMid);
+                    glUniform1f(prog.loc("uSatHighlight"), cp.satHighlight);
+                    glUniform3f(prog.loc("uLumaCoeffs"),   lumaWR, lumaWG, lumaWB);
+
+                    glUseProgram(0);
+                    gl->renderPass(prog, srcTex, fboC, width, height);
+                }
+
+                // ── Pass 1 — Halation Horizontal  (texC → fboA; result in texA) ──
                 {
                     MasterFilm::ShaderProgram& prog = gl->halationHShader();
                     const float innerRadius = preset->halation.radius * static_cast<float>(height) * 0.03f;
@@ -489,12 +541,12 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     glUniform3f(prog.loc("uSpecBias"),
                                 preset->halation.biasR, preset->halation.biasG, preset->halation.biasB);
                     glUseProgram(0);
-                    gl->renderPass(prog, cpuTex, fboA, width, height);
+                    gl->renderPass(prog, texC, fboA, width, height);
                 }
 
-                // Pass 2 — Halation Vertical + Composite
-                //   uSrc  = cpuTex (original pre-halation image)
-                //   uHBlur = texA  (horizontal-blur output from Pass 1)
+                // ── Pass 2 — Halation Vertical + Composite ──
+                //   uSrc  = texC (tone/color result, pre-halation)
+                //   uHBlur = texA (horizontal-blur from Pass 1)
                 //   result → fboB; composite in texB
                 //   uIntensity = 0 when halation is disabled → shader outputs src unchanged.
                 {
@@ -504,16 +556,16 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     glUniform1f(prog.loc("uInnerRadius"),      innerRadius);
                     glUniform1f(prog.loc("uOuterRadiusScale"), preset->halation.outerRadiusScale);
                     glUniform1f(prog.loc("uOuterWeight"),      preset->halation.outerWeight);
-                    glUniform1f(prog.loc("uThreshold"),        preset->halation.threshold);   // declared but unused in shader, safe
-                    glUniform3f(prog.loc("uSpecBias"),                                         // declared but unused in shader, safe
+                    glUniform1f(prog.loc("uThreshold"),        preset->halation.threshold);
+                    glUniform3f(prog.loc("uSpecBias"),
                                 preset->halation.biasR, preset->halation.biasG, preset->halation.biasB);
                     glUniform1f(prog.loc("uIntensity"),
                                 enableHalation ? preset->halation.intensity : 0.0f);
                     glUseProgram(0);
-                    gl->renderPass(prog, cpuTex, fboB, width, height, texA, "uHBlur");
+                    gl->renderPass(prog, texC, fboB, width, height, texA, "uHBlur");
                 }
 
-                // Pass 3 — Grain  (texB → fboA; result overwrites texA)
+                // ── Pass 3 — Grain  (texB → fboA; result in texA) ──
                 //   uRMSGranularity = 0 when grain is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->grainShader();
@@ -535,10 +587,10 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     glUniform1f(prog.loc("uGrainSize"),           gp.grain_size);
                     glUniform1f(prog.loc("uISO"),                 gp.iso);
                     glUseProgram(0);
-                    gl->renderPass(prog, texB, fboA, width, height);   // result now in texA
+                    gl->renderPass(prog, texB, fboA, width, height);
                 }
 
-                // Pass 4 — Acutance  (texA → host output FBO)
+                // ── Pass 4 — Acutance  (texA → host output FBO) ──
                 //   uIntensity = 0 when acutance is disabled → shader outputs src unchanged.
                 {
                     MasterFilm::ShaderProgram& prog = gl->acutanceShader();
@@ -552,27 +604,32 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     gl->renderPass(prog, texA, static_cast<GLuint>(hostFBO), width, height);
                 }
 
-                // Cleanup GL resources and source image.
-                glDeleteTextures(1, &cpuTex);  cpuTex = 0;
-                glDeleteTextures(1, &texA);    texA   = 0;
-                glDeleteTextures(1, &texB);    texB   = 0;
-                glDeleteFramebuffers(1, &fboA); fboA  = 0;
-                glDeleteFramebuffers(1, &fboB); fboB  = 0;
-                gEffectSuite->clipReleaseImage(gpuSrcImg); gpuSrcImg = nullptr;
+                // ── Cleanup GL resources ─────────────────────────────────────
+                glDeleteTextures(1, &negLUTTex);   negLUTTex  = 0;
+                glDeleteTextures(1, &printLUTTex);  printLUTTex = 0;
+                glDeleteTextures(1, &texA);         texA = 0;
+                glDeleteTextures(1, &texB);         texB = 0;
+                glDeleteTextures(1, &texC);         texC = 0;
+                glDeleteFramebuffers(1, &fboA);     fboA = 0;
+                glDeleteFramebuffers(1, &fboB);     fboB = 0;
+                glDeleteFramebuffers(1, &fboC);     fboC = 0;
+                gGLSuite->clipFreeTexture(srcTexHandle); srcTexHandle = nullptr;
 
                 return kOfxStatOK;
             }
             catch (...) {
                 // Clean up any GL resources that were created before the exception.
-                if (cpuTex) glDeleteTextures(1, &cpuTex);
+                if (negLUTTex)  glDeleteTextures(1, &negLUTTex);
+                if (printLUTTex) glDeleteTextures(1, &printLUTTex);
                 if (texA)   glDeleteTextures(1, &texA);
                 if (texB)   glDeleteTextures(1, &texB);
+                if (texC)   glDeleteTextures(1, &texC);
                 if (fboA)   glDeleteFramebuffers(1, &fboA);
                 if (fboB)   glDeleteFramebuffers(1, &fboB);
-                if (gpuSrcImg) gEffectSuite->clipReleaseImage(gpuSrcImg);
+                if (fboC)   glDeleteFramebuffers(1, &fboC);
+                if (srcTexHandle) gGLSuite->clipFreeTexture(srcTexHandle);
 
                 // Black-fill the destination so GPU failures are visually obvious during testing.
-                // Correct output = GPU path worked.  Black frame = GPU path failed (check stderr).
                 OfxPropertySetHandle dstImgBlack = nullptr;
                 gEffectSuite->clipGetImage(dstClip, renderTime, nullptr, &dstImgBlack);
                 if (dstImgBlack) {
@@ -596,125 +653,15 @@ static OfxStatus onRender(OfxImageEffectHandle instance,
                     }
                     gEffectSuite->clipReleaseImage(dstImgBlack);
                 }
-                return kOfxStatOK;  // host sees "success"; black frame signals the failure visually
+                return kOfxStatOK;
             }
         }
     }
 #endif // MASTERFILM_ENABLE_OPENGL
 
-    // ── CPU path (full pipeline) ──────────────────────────────────────────────
-    // Runs when OpenGL is unavailable or not enabled by the host.
-
-    // ── Fetch image buffers ───────────────────────────────────────────────────
-    OfxPropertySetHandle srcImg = nullptr;
-    OfxPropertySetHandle dstImg = nullptr;
-    gEffectSuite->clipGetImage(srcClip, renderTime, nullptr, &srcImg);
-    gEffectSuite->clipGetImage(dstClip, renderTime, nullptr, &dstImg);
-
-    if (!srcImg || !dstImg) {
-        if (srcImg) gEffectSuite->clipReleaseImage(srcImg);
-        if (dstImg) gEffectSuite->clipReleaseImage(dstImg);
-        return kOfxStatFailed;
-    }
-
-    // ── Pixel pointers and strides ────────────────────────────────────────────
-    void* srcPtr = nullptr;
-    void* dstPtr = nullptr;
-    gPropSuite->propGetPointer(srcImg, kOfxImagePropData, 0, &srcPtr);
-    gPropSuite->propGetPointer(dstImg, kOfxImagePropData, 0, &dstPtr);
-
-    int srcRowBytes = 0, dstRowBytes = 0;
-    gPropSuite->propGetInt(srcImg, kOfxImagePropRowBytes, 0, &srcRowBytes);
-    gPropSuite->propGetInt(dstImg, kOfxImagePropRowBytes, 0, &dstRowBytes);
-
-    OfxRectI srcBounds, dstBounds;
-    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 0, &srcBounds.x1);
-    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 1, &srcBounds.y1);
-    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 2, &srcBounds.x2);
-    gPropSuite->propGetInt(srcImg, kOfxImagePropBounds, 3, &srcBounds.y2);
-    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 0, &dstBounds.x1);
-    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 1, &dstBounds.y1);
-    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 2, &dstBounds.x2);
-    gPropSuite->propGetInt(dstImg, kOfxImagePropBounds, 3, &dstBounds.y2);
-
-    if (!srcPtr || !dstPtr) {
-        gEffectSuite->clipReleaseImage(srcImg);
-        gEffectSuite->clipReleaseImage(dstImg);
-        return kOfxStatFailed;
-    }
-
-    // ── Ping-pong buffers (full frame, contiguous) ────────────────────────────
-    std::vector<float> bufA(static_cast<size_t>(nPixels * kNComp));
-    std::vector<float> bufB(static_cast<size_t>(nPixels * kNComp));
-
-    // ── Copy source image into bufA (destriding) ──────────────────────────────
-    for (int y = 0; y < height; ++y)
-    {
-        const float* srcRow = reinterpret_cast<const float*>(
-            static_cast<const char*>(srcPtr)
-            + static_cast<ptrdiff_t>(renderWindow.y1 + y - srcBounds.y1) * srcRowBytes
-            + static_cast<ptrdiff_t>(renderWindow.x1 - srcBounds.x1) * kBytesPerPixel);
-
-        std::memcpy(&bufA[static_cast<size_t>(y * width * kNComp)],
-                    srcRow,
-                    static_cast<size_t>(width * kBytesPerPixel));
-    }
-
-    // ── Render pipeline: Film → Halation → Grain → Acutance ────────────────────
-    // The unified film processor replaces the old Tone + Color split.
-    // Each stage reads from one buffer and writes to the other (ping-pong).
-    // When a stage is disabled, memcpy preserves the alternating invariant so
-    // the final result always lands in bufB regardless of which stages ran.
-    const size_t cpuBufBytes = static_cast<size_t>(nPixels * kNComp) * sizeof(float);
-
-    // bufA → Film (Tone+Color unified) → bufB
-    if (enableTone || enableColor)
-        filmProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp, colorSpaceMode);
-    else
-        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
-
-    // bufB → (skip one ping-pong step — was Color) → bufA
-    // The unified processor consumed both Tone and Color in one pass,
-    // so we swap to maintain the ping-pong invariant for downstream stages.
-    std::swap(bufA, bufB);
-    // bufA now has the film result
-
-    // bufA → Halation → bufB
-    if (enableHalation)
-        halationProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
-    else
-        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
-
-    // bufB → Grain → bufA
-    if (enableGrain)
-        grainProc.processCPU(bufB.data(), bufA.data(), width, height, kNComp, renderSeed);
-    else
-        std::memcpy(bufA.data(), bufB.data(), cpuBufBytes);
-
-    // bufA → Acutance → bufB
-    if (enableAcutance)
-        acutanceProc.processCPU(bufA.data(), bufB.data(), width, height, kNComp);
-    else
-        std::memcpy(bufB.data(), bufA.data(), cpuBufBytes);
-
-    // ── Copy bufB (final result) to destination image (re-striding) ───────────
-    for (int y = 0; y < height; ++y)
-    {
-        float* dstRow = reinterpret_cast<float*>(
-            static_cast<char*>(dstPtr)
-            + static_cast<ptrdiff_t>(renderWindow.y1 + y - dstBounds.y1) * dstRowBytes
-            + static_cast<ptrdiff_t>(renderWindow.x1 - dstBounds.x1) * kBytesPerPixel);
-
-        std::memcpy(dstRow,
-                    &bufB[static_cast<size_t>(y * width * kNComp)],
-                    static_cast<size_t>(width * kBytesPerPixel));
-    }
-
-    // ── Release ───────────────────────────────────────────────────────────────
-    gEffectSuite->clipReleaseImage(srcImg);
-    gEffectSuite->clipReleaseImage(dstImg);
-
-    return kOfxStatOK;
+    // ── No CPU fallback — GPU is required ────────────────────────────────────
+    // If we reach here, GPU rendering was unavailable or not enabled.
+    return kOfxStatFailed;
 }
 
 static OfxStatus pluginMain(const char* action,

@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <cstdio>
+#include <vector>
 
 namespace MasterFilm {
 
@@ -202,6 +203,30 @@ void main() {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         return true;
+    }
+
+    GLuint GLSLDispatch::uploadLUTRow(const float* chR, const float* chG, const float* chB, int size)
+    {
+        // Pack into RGBA32F: R=chR, G=chG, B=chB, A=0
+        std::vector<float> packed(static_cast<size_t>(size) * 4);
+        for (int i = 0; i < size; ++i) {
+            packed[i * 4 + 0] = chR[i];
+            packed[i * 4 + 1] = chG[i];
+            packed[i * 4 + 2] = chB[i];
+            packed[i * 4 + 3] = 0.0f;
+        }
+
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, 1, 0,
+                     GL_RGBA, GL_FLOAT, packed.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return tex;
     }
 
 } // namespace MasterFilm

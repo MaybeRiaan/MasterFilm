@@ -537,6 +537,39 @@ OfxStatus UnifiedFilmProcessor::processCPU(const float* src, float* dst,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  GPU data helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+void UnifiedFilmProcessor::getExitDMid(float& r, float& g, float& b) const
+{
+    const auto& cm = mColor.couplingMatrix;
+    const bool isIdentity = couplingIsIdentity();
+    const float fc = mTone.filmColor;
+
+    if (fc < 1.0f && !isIdentity)
+    {
+        float bR = mDMidG + fc * (mDMidR - mDMidG);
+        float bG = mDMidG;
+        float bB = mDMidG + fc * (mDMidB - mDMidG);
+        r = cm[0] * bR + cm[1] * bG + cm[2] * bB;
+        g = cm[3] * bR + cm[4] * bG + cm[5] * bB;
+        b = cm[6] * bR + cm[7] * bG + cm[8] * bB;
+    }
+    else if (fc < 1.0f)
+    {
+        r = mDMidG + fc * (mDMidR - mDMidG);
+        g = mDMidG;
+        b = mDMidG + fc * (mDMidB - mDMidG);
+    }
+    else
+    {
+        r = mCoupledDMidR;
+        g = mCoupledDMidG;
+        b = mCoupledDMidB;
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  GPU stub
 // ═════════════════════════════════════════════════════════════════════════════
 
